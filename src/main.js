@@ -431,6 +431,7 @@ function hideAgentView(tabId) {
 
   // Re-fit xterm
   requestAnimationFrame(() => {
+    if (!tabs.has(tabId)) return;
     tab.fitAddon.fit();
   });
 }
