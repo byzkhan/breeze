@@ -1321,7 +1321,7 @@ document.querySelectorAll(".launcher-btn").forEach((btn) => {
     if (!activeTabId) return;
 
     const cmd = btn.getAttribute("data-cmd");
-    const label = btn.getAttribute("data-label");
+    if (!cmd) return;
     const firstWord = cmd.split(" ")[0];
 
     const exists = await invoke("check_command_exists", { command: firstWord });
