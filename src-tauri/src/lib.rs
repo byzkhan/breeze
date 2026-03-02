@@ -131,6 +131,10 @@ fn spawn_shell(app: AppHandle, tab_id: String, rows: u16, cols: u16) -> Result<(
                 Ok(0) => {
                     flush_accum(&mut accum, &app_handle, &tid);
                     let _ = app_handle.emit("pty-exit", json!({ "tab_id": tid }));
+                    if let Some(state) = app_handle.try_state::<PtyState>() {
+                        let mut sessions = state.sessions.lock().unwrap();
+                        sessions.remove(&tid);
+                    }
                     break;
                 }
                 Ok(n) => {
@@ -151,6 +155,10 @@ fn spawn_shell(app: AppHandle, tab_id: String, rows: u16, cols: u16) -> Result<(
                 Err(_) => {
                     flush_accum(&mut accum, &app_handle, &tid);
                     let _ = app_handle.emit("pty-exit", json!({ "tab_id": tid }));
+                    if let Some(state) = app_handle.try_state::<PtyState>() {
+                        let mut sessions = state.sessions.lock().unwrap();
+                        sessions.remove(&tid);
+                    }
                     break;
                 }
             }
@@ -400,7 +408,8 @@ async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Resu
 
     // Truncate very long output
     if output.len() > 8000 {
-        output.truncate(8000);
+        let truncate_at = output.char_indices().nth(8000).map(|(i, _)| i).unwrap_or(output.len());
+        output.truncate(truncate_at);
         output.push_str("\n... (output truncated)");
     }
 
@@ -578,6 +587,9 @@ async fn agent_chat(
                 "input": input
             }));
         }
+        if assistant_content.is_empty() {
+            break;
+        }
         messages.push(json!({"role": "assistant", "content": assistant_content}));
 
         // If stop_reason is tool_use, execute tools and loop
@@ -589,6 +601,16 @@ async fn agent_chat(
                     let input: serde_json::Value =
                         serde_json::from_str(input_json).unwrap_or(json!({}));
                     let command = input["command"].as_str().unwrap_or("").to_string();
+
+                    // Validate that command is not empty or whitespace-only
+                    if command.trim().is_empty() {
+                        tool_results.push(json!({
+                            "type": "tool_result",
+                            "tool_use_id": id,
+                            "content": "Error: command cannot be empty"
+                        }));
+                        continue;
+                    }
 
                     // Emit event: command is about to run
                     let _ = app.emit(
@@ -613,6 +635,13 @@ async fn agent_chat(
                         "type": "tool_result",
                         "tool_use_id": id,
                         "content": result_text
+                    }));
+                } else {
+                    // Unknown tool - return error result
+                    tool_results.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": format!("Error: unknown tool '{}'", name)
                     }));
                 }
             }

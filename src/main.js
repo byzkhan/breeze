@@ -170,7 +170,7 @@ function clearAiLines() {
   if (!tab) return;
   // Move up and clear each line we wrote
   for (let i = 0; i < aiLineCount; i++) {
-    tab.term.write("\x1b[A\x1b[2K");
+    tab.term.write("\x1b[2K\x1b[A");
   }
   // Move cursor to start of current line
   tab.term.write("\r");
@@ -431,6 +431,7 @@ function hideAgentView(tabId) {
 
   // Re-fit xterm
   requestAnimationFrame(() => {
+    if (!tabs.has(tabId)) return;
     tab.fitAddon.fit();
   });
 }
@@ -456,6 +457,8 @@ function exitAgentMode(tabId) {
 async function handleAgentInput(tabId, text) {
   const tab = tabs.get(tabId);
   if (!tab) return;
+
+  if (tab.agentStreaming) return; // Prevent concurrent agent calls
 
   // Show the conversation view
   showAgentView(tabId);
@@ -784,6 +787,7 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
     textarea.value = textarea.value.substring(0, start) + "  " + textarea.value.substring(end);
     textarea.selectionStart = textarea.selectionEnd = start + 2;
     updateHighlight(textarea, codeEl);
+    autoResizeEditor(textarea);
     return;
   }
 
@@ -985,7 +989,7 @@ function createTab() {
   tabsContainer.appendChild(tabEl);
 
   // Store in map
-  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentHistory: [], agentStreaming: false, agentConversationEl: null });
+  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentHistory: [], agentStreaming: false, agentConversationEl: null, lastCwd: "" });
 
   // Switch to the new tab, then fit + push cursor to bottom + spawn shell
   switchTab(tabId);
@@ -1258,8 +1262,6 @@ const ctxGitText = document.getElementById("ctx-git-text");
 const ctxNode = document.getElementById("ctx-node");
 const ctxNodeText = document.getElementById("ctx-node-text");
 
-let lastCwd = "";
-
 function friendlyCwd(path) {
   const home = "/Users/" + path.split("/")[2];
   let friendly = path;
@@ -1273,10 +1275,12 @@ function friendlyCwd(path) {
 
 async function updateContextBar() {
   if (!activeTabId) return;
+  const tab = tabs.get(activeTabId);
+  if (!tab) return;
   try {
     const cwd = await invoke("get_shell_cwd", { tabId: activeTabId });
-    if (cwd === lastCwd) return;
-    lastCwd = cwd;
+    if (cwd === tab.lastCwd) return;
+    tab.lastCwd = cwd;
 
     ctxCwdText.textContent = friendlyCwd(cwd);
 
@@ -1321,7 +1325,7 @@ document.querySelectorAll(".launcher-btn").forEach((btn) => {
     if (!activeTabId) return;
 
     const cmd = btn.getAttribute("data-cmd");
-    const label = btn.getAttribute("data-label");
+    if (!cmd) return;
     const firstWord = cmd.split(" ")[0];
 
     const exists = await invoke("check_command_exists", { command: firstWord });
