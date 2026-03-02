@@ -170,7 +170,7 @@ function clearAiLines() {
   if (!tab) return;
   // Move up and clear each line we wrote
   for (let i = 0; i < aiLineCount; i++) {
-    tab.term.write("\x1b[A\x1b[2K");
+    tab.term.write("\x1b[2K\x1b[A");
   }
   // Move cursor to start of current line
   tab.term.write("\r");
