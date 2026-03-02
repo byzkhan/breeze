@@ -131,6 +131,10 @@ fn spawn_shell(app: AppHandle, tab_id: String, rows: u16, cols: u16) -> Result<(
                 Ok(0) => {
                     flush_accum(&mut accum, &app_handle, &tid);
                     let _ = app_handle.emit("pty-exit", json!({ "tab_id": tid }));
+                    if let Some(state) = app_handle.try_state::<PtyState>() {
+                        let mut sessions = state.sessions.lock().unwrap();
+                        sessions.remove(&tid);
+                    }
                     break;
                 }
                 Ok(n) => {
@@ -151,6 +155,10 @@ fn spawn_shell(app: AppHandle, tab_id: String, rows: u16, cols: u16) -> Result<(
                 Err(_) => {
                     flush_accum(&mut accum, &app_handle, &tid);
                     let _ = app_handle.emit("pty-exit", json!({ "tab_id": tid }));
+                    if let Some(state) = app_handle.try_state::<PtyState>() {
+                        let mut sessions = state.sessions.lock().unwrap();
+                        sessions.remove(&tid);
+                    }
                     break;
                 }
             }
