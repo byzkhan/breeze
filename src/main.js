@@ -457,6 +457,8 @@ async function handleAgentInput(tabId, text) {
   const tab = tabs.get(tabId);
   if (!tab) return;
 
+  if (tab.agentStreaming) return; // Prevent concurrent agent calls
+
   // Show the conversation view
   showAgentView(tabId);
 
