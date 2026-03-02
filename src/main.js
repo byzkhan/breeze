@@ -985,7 +985,7 @@ function createTab() {
   tabsContainer.appendChild(tabEl);
 
   // Store in map
-  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentHistory: [], agentStreaming: false, agentConversationEl: null });
+  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentHistory: [], agentStreaming: false, agentConversationEl: null, lastCwd: "" });
 
   // Switch to the new tab, then fit + push cursor to bottom + spawn shell
   switchTab(tabId);
@@ -1258,8 +1258,6 @@ const ctxGitText = document.getElementById("ctx-git-text");
 const ctxNode = document.getElementById("ctx-node");
 const ctxNodeText = document.getElementById("ctx-node-text");
 
-let lastCwd = "";
-
 function friendlyCwd(path) {
   const home = "/Users/" + path.split("/")[2];
   let friendly = path;
@@ -1273,10 +1271,12 @@ function friendlyCwd(path) {
 
 async function updateContextBar() {
   if (!activeTabId) return;
+  const tab = tabs.get(activeTabId);
+  if (!tab) return;
   try {
     const cwd = await invoke("get_shell_cwd", { tabId: activeTabId });
-    if (cwd === lastCwd) return;
-    lastCwd = cwd;
+    if (cwd === tab.lastCwd) return;
+    tab.lastCwd = cwd;
 
     ctxCwdText.textContent = friendlyCwd(cwd);
 
