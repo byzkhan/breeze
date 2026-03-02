@@ -787,6 +787,7 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
     textarea.value = textarea.value.substring(0, start) + "  " + textarea.value.substring(end);
     textarea.selectionStart = textarea.selectionEnd = start + 2;
     updateHighlight(textarea, codeEl);
+    autoResizeEditor(textarea);
     return;
   }
 
