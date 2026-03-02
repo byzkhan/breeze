@@ -578,6 +578,9 @@ async fn agent_chat(
                 "input": input
             }));
         }
+        if assistant_content.is_empty() {
+            break;
+        }
         messages.push(json!({"role": "assistant", "content": assistant_content}));
 
         // If stop_reason is tool_use, execute tools and loop
