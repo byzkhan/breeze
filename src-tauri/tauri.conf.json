@@ -9,12 +9,18 @@
     "frontendDist": "../src"
   },
   "app": {
+    "macOSPrivateApi": true,
     "withGlobalTauri": true,
     "windows": [
       {
         "title": "Breeze",
         "width": 900,
-        "height": 600
+        "height": 600,
+        "decorations": true,
+        "transparent": false,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "fullscreen": false
       }
     ],
     "security": {
