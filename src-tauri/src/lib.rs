@@ -602,6 +602,16 @@ async fn agent_chat(
                         serde_json::from_str(input_json).unwrap_or(json!({}));
                     let command = input["command"].as_str().unwrap_or("").to_string();
 
+                    // Validate that command is not empty or whitespace-only
+                    if command.trim().is_empty() {
+                        tool_results.push(json!({
+                            "type": "tool_result",
+                            "tool_use_id": id,
+                            "content": "Error: command cannot be empty"
+                        }));
+                        continue;
+                    }
+
                     // Emit event: command is about to run
                     let _ = app.emit(
                         "agent-tool-call",
@@ -625,6 +635,13 @@ async fn agent_chat(
                         "type": "tool_result",
                         "tool_use_id": id,
                         "content": result_text
+                    }));
+                } else {
+                    // Unknown tool - return error result
+                    tool_results.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": format!("Error: unknown tool '{}'", name)
                     }));
                 }
             }
