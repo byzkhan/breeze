@@ -4,13 +4,19 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "build": "esbuild src/main.js --bundle --outdir=src/dist --format=esm --loader:.css=css",
+    "dev": "npm run build && tauri dev",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-shell": "^2"
+    "@tauri-apps/plugin-shell": "^2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2",
+    "esbuild": "^0.27.3"
   }
 }

@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.zaid.breeze",
   "build": {
+    "beforeDevCommand": "npm run build",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../src"
   },
   "app": {
