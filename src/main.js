@@ -1374,8 +1374,9 @@ function showToast(msg, duration = 3000) {
 document.querySelectorAll(".launcher-btn").forEach((btn) => {
   btn.addEventListener("click", async () => {
     if (!activeTabId) return;
-    const activeTab = tabs.get(activeTabId);
-    if (activeTab && activeTab.aiMode) hideSuggestion(activeTabId);
+    const tabId = activeTabId;
+    const activeTab = tabs.get(tabId);
+    if (activeTab && activeTab.aiMode) hideSuggestion(tabId);
 
     const cmd = btn.getAttribute("data-cmd");
     if (!cmd) return;
@@ -1387,7 +1388,7 @@ document.querySelectorAll(".launcher-btn").forEach((btn) => {
       return;
     }
 
-    const tab = tabs.get(activeTabId);
+    const tab = tabs.get(tabId);
     if (tab) {
       // Clear editor and hide it before sending command
       const textarea = tab.editorEl?.querySelector(".input-editor-textarea");
@@ -1399,10 +1400,10 @@ document.querySelectorAll(".launcher-btn").forEach((btn) => {
       }
       tab.atPrompt = false;
       tab.editorDraft = "";
-      hideEditor(activeTabId);
+      hideEditor(tabId);
     }
 
-    invoke("write_pty", { tabId: activeTabId, data: "\x15" + cmd + "\r" });
+    invoke("write_pty", { tabId: tabId, data: "\x15" + cmd + "\r" });
     recentCommands.push(cmd);
     if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
   });
