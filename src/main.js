@@ -502,37 +502,59 @@ async function handleAgentInput(tabId, text) {
       history: tab.agentHistory,
     });
 
+    // Re-fetch tab after await to handle race conditions where tab/conversation
+    // may have been closed or exited agent mode during the async call
+    const currentTab = tabs.get(tabId);
+    if (!currentTab || !currentTab.agentConversationEl) {
+      return; // Tab closed or exited agent mode, bail out
+    }
+
     // Remove thinking indicator if still present
     if (thinkingEl && thinkingEl.parentNode) {
       thinkingEl.remove();
     }
 
     // If no streaming el was created (e.g. empty response), add the final message
-    if (!tab._agentStreamEl) {
+    if (!currentTab._agentStreamEl) {
       addAgentMessage(tabId, "assistant", result);
     } else {
       // Do final render with complete text
-      tab._agentStreamEl.innerHTML = renderMarkdown(result);
-      tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
+      currentTab._agentStreamEl.innerHTML = renderMarkdown(result);
+      if (currentTab.agentConversationEl) {
+        currentTab.agentConversationEl.scrollTop = currentTab.agentConversationEl.scrollHeight;
+      }
     }
 
     // Push to conversation history (cap at 20 messages)
-    tab.agentHistory.push({ role: "user", content: text });
-    tab.agentHistory.push({ role: "assistant", content: result });
-    while (tab.agentHistory.length > 20) {
-      tab.agentHistory.shift();
+    if (currentTab.agentHistory) {
+      currentTab.agentHistory.push({ role: "user", content: text });
+      currentTab.agentHistory.push({ role: "assistant", content: result });
+      while (currentTab.agentHistory.length > 20) {
+        currentTab.agentHistory.shift();
+      }
     }
   } catch (err) {
+    // Re-fetch tab after await to handle race conditions
+    const currentTab = tabs.get(tabId);
+
     if (thinkingEl && thinkingEl.parentNode) {
       thinkingEl.remove();
     }
-    addAgentMessage(tabId, "assistant", "Error: " + String(err));
+
+    // Only add error message if tab and conversation still exist
+    if (currentTab && currentTab.agentConversationEl) {
+      addAgentMessage(tabId, "assistant", "Error: " + String(err));
+    }
   } finally {
-    tab.agentStreaming = false;
-    tab._agentStreamBuffer = "";
-    tab._agentStreamEl = null;
-    tab.atPrompt = true;
-    showEditor(tabId);
+    // Re-fetch tab after await to handle race conditions
+    const currentTab = tabs.get(tabId);
+    if (currentTab) {
+      currentTab.agentStreaming = false;
+      currentTab._agentStreamBuffer = "";
+      currentTab._agentStreamEl = null;
+      currentTab.atPrompt = true;
+      showEditor(tabId);
+    }
   }
 }
 
