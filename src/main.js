@@ -1509,7 +1509,7 @@ window.addEventListener("focus", () => {
   if (!activeTabId) return;
   const tab = tabs.get(activeTabId);
   if (!tab) return;
-  if (tab.atPrompt && tab.editorEl) {
+  if (tab.atPrompt && tab.editorEl && !tab.agentStreaming) {
     const textarea = tab.editorEl.querySelector(".input-editor-textarea");
     if (textarea) textarea.focus();
   } else {
