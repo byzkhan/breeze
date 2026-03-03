@@ -98,10 +98,7 @@ function scheduleFlush() {
 }
 
 let inputBuffer = "";
-let aiMode = false;
 let aiRequestId = 0;
-let pendingCommand = null;
-let aiLineCount = 0; // how many terminal lines the AI indicator occupies
 
 const recentCommands = [];
 const MAX_HISTORY = 10;
@@ -166,16 +163,15 @@ function looksLikeEnglish(input) {
 
 // Erase any previously written AI lines from the terminal
 function clearAiLines(tabId) {
-  if (aiLineCount <= 0) return;
   const tab = tabs.get(tabId);
-  if (!tab) return;
+  if (!tab || tab.aiLineCount <= 0) return;
   // Move up and clear each line we wrote
-  for (let i = 0; i < aiLineCount; i++) {
+  for (let i = 0; i < tab.aiLineCount; i++) {
     tab.term.write("\x1b[2K\x1b[A");
   }
   // Move cursor to start of current line
   tab.term.write("\r");
-  aiLineCount = 0;
+  tab.aiLineCount = 0;
 }
 
 // Write AI status/suggestion inline in the terminal (like Claude Code)
@@ -184,11 +180,13 @@ function writeAiLines(tabId, lines) {
   if (!tab) return;
   clearAiLines(tabId);
   tab.term.write("\r\n" + lines.join("\r\n"));
-  aiLineCount = lines.length;
+  tab.aiLineCount = lines.length;
 }
 
 function showSuggestion(tabId, command, explanation, dangerous) {
-  pendingCommand = command;
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+  tab.pendingCommand = command;
   const icon = dangerous ? "\x1b[31m\u26A0\x1b[0m" : "\x1b[32m\u2713\x1b[0m";
   const cmdColor = dangerous ? "\x1b[31m" : "\x1b[36m";
   const lines = [
@@ -197,19 +195,23 @@ function showSuggestion(tabId, command, explanation, dangerous) {
     `  \x1b[90mEnter to run \u00B7 Escape to cancel\x1b[0m`,
   ];
   writeAiLines(tabId, lines);
-  aiMode = true;
+  tab.aiMode = true;
 }
 
 function showLoading(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
   writeAiLines(tabId, ["  \x1b[33m\u2731\x1b[0m \x1b[38;5;209mThinking\u2026\x1b[0m"]);
-  aiMode = true;
+  tab.aiMode = true;
 }
 
 function hideSuggestion(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
   clearAiLines(tabId);
-  aiMode = false;
+  tab.aiMode = false;
   aiRequestId++; // Invalidate any in-flight requests
-  pendingCommand = null;
+  tab.pendingCommand = null;
 }
 
 async function handleEnglishInput(tabId, text) {
@@ -716,11 +718,11 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
   if (!tab) return;
 
   // AI mode intercept
-  if (aiMode) {
+  if (tab.aiMode) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (pendingCommand && !pendingCommand.startsWith("Error:")) {
-        const cmd = pendingCommand;
+      if (tab.pendingCommand && !tab.pendingCommand.startsWith("Error:")) {
+        const cmd = tab.pendingCommand;
         hideSuggestion(activeTabId);
         recentCommands.push(cmd);
         if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
@@ -1038,7 +1040,7 @@ function createTab() {
   tabsContainer.appendChild(tabEl);
 
   // Store in map
-  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentHistory: [], agentStreaming: false, agentConversationEl: null, lastCwd: "" });
+  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentHistory: [], agentStreaming: false, agentConversationEl: null, lastCwd: "", aiMode: false, pendingCommand: null, aiLineCount: 0 });
 
   // Switch to the new tab, then fit + push cursor to bottom + spawn shell
   switchTab(tabId);
@@ -1370,8 +1372,9 @@ function showToast(msg, duration = 3000) {
 // ── Launcher bar ──
 document.querySelectorAll(".launcher-btn").forEach((btn) => {
   btn.addEventListener("click", async () => {
-    if (aiMode) hideSuggestion(activeTabId);
     if (!activeTabId) return;
+    const activeTab = tabs.get(activeTabId);
+    if (activeTab && activeTab.aiMode) hideSuggestion(activeTabId);
 
     const cmd = btn.getAttribute("data-cmd");
     if (!cmd) return;
