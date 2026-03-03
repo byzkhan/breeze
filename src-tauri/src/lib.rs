@@ -416,8 +416,10 @@ async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Resu
     }
 
     // Truncate very long output
-    if output.len() > 8000 {
-        let truncate_at = output.char_indices().nth(8000).map(|(i, _)| i).unwrap_or(output.len());
+    const MAX_CHARS: usize = 8000;
+    let char_count = output.chars().count();
+    if char_count > MAX_CHARS {
+        let truncate_at = output.char_indices().nth(MAX_CHARS).map(|(i, _)| i).unwrap_or(output.len());
         output.truncate(truncate_at);
         output.push_str("\n... (output truncated)");
     }
