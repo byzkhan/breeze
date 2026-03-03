@@ -8,6 +8,13 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const { getCurrentWindow } = window.__TAURI__.window;
 
+// ── Agent spinner ──
+const SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+const SPINNER_VERBS = [
+  "Thinking", "Analyzing", "Reasoning", "Processing", "Evaluating",
+  "Considering", "Planning", "Investigating", "Working", "Examining"
+];
+
 // ── Terminal theme (shared across all tabs) ──
 const TERM_THEME = {
   background: "#000000",
@@ -363,11 +370,11 @@ function renderMarkdown(text) {
     html += `<p>${inlineFormat(esc(line))}</p>`;
   }
 
-  // Close unclosed code block (streaming may end mid-block)
+  // Close unclosed code block (streaming may end mid-block) — show as streaming
   if (inCodeBlock) {
     const langLabel = codeLang || "code";
     const codeContent = esc(codeLines.join("\n"));
-    html += `<pre><div class="agent-code-header"><span class="agent-code-lang">${esc(langLabel)}</span></div><code>${codeContent}</code></pre>`;
+    html += `<pre class="streaming"><div class="agent-code-header"><span class="agent-code-lang">${esc(langLabel)}…</span></div><code>${codeContent}</code></pre>`;
   }
   closeList();
 
@@ -418,17 +425,66 @@ function addAgentText(tabId) {
   return el;
 }
 
-function addThinkingIndicator(tabId) {
+function addThinkingIndicator(tabId, stepInfo) {
   const tab = tabs.get(tabId);
   if (!tab || !tab.agentConversationEl) return null;
 
+  // Clean up any existing thinking state first
+  removeThinkingIndicators(tab);
+
   const el = document.createElement("div");
   el.className = "agent-thinking";
-  el.innerHTML = `<div class="agent-thinking-dot"><span></span><span></span><span></span></div>Thinking…`;
+
+  const spinnerSpan = document.createElement("span");
+  spinnerSpan.className = "agent-spinner";
+  spinnerSpan.textContent = SPINNER_FRAMES[0];
+
+  const textSpan = document.createElement("span");
+  textSpan.className = "agent-thinking-text";
+
+  el.appendChild(spinnerSpan);
+  el.appendChild(textSpan);
   tab.agentConversationEl.appendChild(el);
   tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
 
+  // Animated state
+  const startTime = Date.now();
+  let frameIdx = 0;
+  let verbIdx = 0;
+  let lastVerbChange = startTime;
+
+  function update() {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    // Rotate braille frame
+    frameIdx = (frameIdx + 1) % SPINNER_FRAMES.length;
+    spinnerSpan.textContent = SPINNER_FRAMES[frameIdx];
+    // Rotate verb every 3s
+    if (Date.now() - lastVerbChange >= 3000) {
+      verbIdx = (verbIdx + 1) % SPINNER_VERBS.length;
+      lastVerbChange = Date.now();
+    }
+    const verb = SPINNER_VERBS[verbIdx];
+    const stepLabel = stepInfo && stepInfo.iteration ? ` · step ${stepInfo.iteration}` : "";
+    textSpan.textContent = `${verb}...${stepLabel} (${elapsed}s)`;
+  }
+
+  update();
+  tab._thinkingInterval = setInterval(update, 80);
+  tab._thinkingStartTime = startTime;
+
   return el;
+}
+
+function removeThinkingIndicators(tab) {
+  if (tab._thinkingInterval) {
+    clearInterval(tab._thinkingInterval);
+    tab._thinkingInterval = null;
+  }
+  if (tab._chunkIdleTimer) {
+    clearTimeout(tab._chunkIdleTimer);
+    tab._chunkIdleTimer = null;
+  }
+  tab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
 }
 
 function showAgentView(tabId) {
@@ -466,6 +522,7 @@ function exitAgentMode(tabId) {
   const tab = tabs.get(tabId);
   if (!tab) return;
 
+  removeThinkingIndicators(tab);
   tab.agentActive = false;
   tab.agentStreaming = false;
 
@@ -527,7 +584,7 @@ async function handleAgentInput(tabId, text) {
     }
 
     // Remove leftover thinking indicators
-    currentTab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
+    removeThinkingIndicators(currentTab);
 
     // Finalize streaming
     if (!currentTab._agentStreamEl) {
@@ -544,6 +601,7 @@ async function handleAgentInput(tabId, text) {
 
     // Only show error if this session is still active (prevents stale errors from old sessions)
     if (currentTab && currentTab.agentConversationEl && currentTab._agentSessionToken === sessionToken) {
+      removeThinkingIndicators(currentTab);
       const el = addAgentText(tabId);
       if (el) {
         el.style.color = "#F87171";
@@ -554,6 +612,7 @@ async function handleAgentInput(tabId, text) {
     const currentTab = tabs.get(tabId);
     // Only reset if this is still the same session (prevents race with new sessions)
     if (currentTab && currentTab._agentSessionToken === sessionToken && currentTab.agentStreaming) {
+      removeThinkingIndicators(currentTab);
       currentTab.agentStreaming = false;
       currentTab._agentStreamBuffer = "";
       currentTab._agentStreamEl = null;
@@ -1204,7 +1263,7 @@ listen("agent-chunk", (event) => {
 
   // Remove thinking indicators on first chunk
   if (!tab._agentStreamEl) {
-    tab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
+    removeThinkingIndicators(tab);
 
     const el = addAgentText(tab_id);
     tab._agentStreamEl = el;
@@ -1216,17 +1275,39 @@ listen("agent-chunk", (event) => {
     tab._agentStreamEl.innerHTML = renderMarkdown(tab._agentStreamBuffer);
     tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
   }
+
+  // Re-show thinking indicator if chunks stop arriving (text → tool gap)
+  if (tab._chunkIdleTimer) clearTimeout(tab._chunkIdleTimer);
+  tab._chunkIdleTimer = setTimeout(() => {
+    tab._chunkIdleTimer = null;
+    if (tab.agentStreaming) {
+      // Finalize current text block so spinner appears below it
+      if (tab._agentStreamEl && tab._agentStreamBuffer) {
+        tab._agentStreamEl.innerHTML = renderMarkdown(tab._agentStreamBuffer);
+        tab._agentStreamEl = null;
+        tab._agentStreamBuffer = "";
+      }
+      addThinkingIndicator(tab_id);
+    }
+  }, 600);
 });
 
 function formatToolStart(toolName, detail) {
-  const icons = { bash: "$", read_file: "\u{1F4C4}", write_file: "\u{1F4DD}", edit_file: "\u{270F}\u{FE0F}", todo: "\u{1F4CB}" };
-  const labels = { bash: "Running", read_file: "Reading", write_file: "Writing", edit_file: "Editing", todo: "Updating plan" };
-  const icon = icons[toolName] || ">";
-  let label = labels[toolName] || toolName;
-  if ((toolName === "read_file" || toolName === "write_file" || toolName === "edit_file") && detail) {
-    label += ` ${detail}`;
+  const config = {
+    bash:       { icon: "$",  active: "Running",       done: "Ran" },
+    read_file:  { icon: "📄", active: "Reading",       done: "Read" },
+    write_file: { icon: "📝", active: "Writing",       done: "Wrote" },
+    edit_file:  { icon: "✏️",  active: "Editing",       done: "Edited" },
+    todo:       { icon: "📋", active: "Updating plan", done: "Updated plan" },
+  };
+  const c = config[toolName] || { icon: ">", active: toolName, done: toolName };
+  let activeLabel = c.active;
+  let doneLabel = c.done;
+  if (["read_file", "write_file", "edit_file"].includes(toolName) && detail) {
+    activeLabel += ` ${detail}`;
+    doneLabel += ` ${detail}`;
   }
-  return { icon, label, detail: toolName === "bash" ? detail : "" };
+  return { icon: c.icon, label: activeLabel, doneLabel, detail: toolName === "bash" ? detail : "" };
 }
 
 listen("agent-tool-start", (event) => {
@@ -1242,13 +1323,14 @@ listen("agent-tool-start", (event) => {
   }
 
   // Remove thinking indicators
-  tab.agentConversationEl.querySelectorAll(".agent-thinking").forEach(el => el.remove());
+  removeThinkingIndicators(tab);
 
-  const { icon, label, detail: cmdDetail } = formatToolStart(tool, detail);
+  const { icon, label, doneLabel, detail: cmdDetail } = formatToolStart(tool, detail);
 
   const block = document.createElement("div");
   block.className = "agent-tool-block";
   block.dataset.tool = tool;
+  block.dataset.doneLabel = doneLabel;
 
   const header = document.createElement("div");
   header.className = "agent-tool-header";
@@ -1299,7 +1381,11 @@ listen("agent-tool-end", (event) => {
     icon.style.color = success ? "#4ADE80" : "#F87171";
   }
   const label = targetBlock.querySelector(".agent-tool-label");
-  if (label) label.textContent = success ? "Done" : "Failed";
+  if (label) {
+    const doneLabel = targetBlock.dataset.doneLabel || "Done";
+    label.textContent = success ? doneLabel : `${doneLabel} (failed)`;
+    if (!success) label.style.color = "#F87171";
+  }
 
   // Add output (collapsed if long)
   const lines = output.split("\n");
@@ -1338,6 +1424,11 @@ listen("agent-tool-end", (event) => {
   }
 
   tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
+
+  // Show thinking indicator between steps to avoid dead gaps
+  if (tab.agentStreaming) {
+    addThinkingIndicator(tab_id);
+  }
 });
 
 listen("agent-thinking", (event) => {
@@ -1345,14 +1436,7 @@ listen("agent-thinking", (event) => {
   const tab = tabs.get(tab_id);
   if (!tab || !tab.agentConversationEl) return;
 
-  // Remove existing thinking indicators
-  tab.agentConversationEl.querySelectorAll(".agent-thinking").forEach(el => el.remove());
-
-  const el = document.createElement("div");
-  el.className = "agent-thinking";
-  el.innerHTML = `<div class="agent-thinking-dot"><span></span><span></span><span></span></div>Thinking (step ${iteration})`;
-  tab.agentConversationEl.appendChild(el);
-  tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
+  addThinkingIndicator(tab_id, { iteration, total });
 });
 
 listen("agent-todo", (event) => {
@@ -1362,14 +1446,9 @@ listen("agent-todo", (event) => {
 
   if (!tab.agentTodoEl) {
     const todoEl = document.createElement("div");
-    todoEl.className = "agent-todo-sticky";
-    // Insert after banner
-    const banner = tab.agentConversationEl.querySelector(".agent-banner");
-    if (banner && banner.nextSibling) {
-      tab.agentConversationEl.insertBefore(todoEl, banner.nextSibling);
-    } else {
-      tab.agentConversationEl.prepend(todoEl);
-    }
+    todoEl.className = "agent-todo-inline";
+    // Append inline at current conversation position (flows with content)
+    tab.agentConversationEl.appendChild(todoEl);
     tab.agentTodoEl = todoEl;
   }
 
@@ -1509,7 +1588,7 @@ document.addEventListener("keydown", async (e) => {
       tab.agentStreaming = false;
 
       // Remove thinking indicators
-      tab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
+      removeThinkingIndicators(tab);
 
       // If streaming was in progress, finalize the partial message
       if (tab._agentStreamEl && tab._agentStreamBuffer) {
@@ -1562,7 +1641,11 @@ function debouncedFit() {
     resizeTimer = null;
     if (activeTabId) {
       const tab = tabs.get(activeTabId);
-      if (tab) tab.fitAddon.fit();
+      if (tab) {
+        tab.fitAddon.fit();
+        // Scroll to cursor so content stays bottom-anchored after fullscreen
+        tab.term.scrollToBottom();
+      }
     }
   }, 100);
 }

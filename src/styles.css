@@ -366,11 +366,9 @@ html, body {
   animation: agent-fade-in 0.15s ease-out;
 }
 
-/* ── Todo sticky panel ── */
-.agent-todo-sticky {
-  position: sticky;
-  top: 0;
-  z-index: 5;
+/* ── Todo inline panel ── */
+.agent-todo-inline {
+  position: relative;
   margin: 4px 12px;
   padding: 8px 12px;
   border-radius: 6px;
@@ -379,6 +377,7 @@ html, body {
   font-size: 12px;
   line-height: 1.5;
   color: #D4D4D8;
+  animation: agent-fade-in 0.15s ease-out;
 }
 
 .agent-todo-title {
@@ -507,25 +506,16 @@ html, body {
   font-size: 12px;
 }
 
-.agent-thinking-dot {
-  display: inline-flex;
-  gap: 3px;
+.agent-spinner {
+  font-family: Menlo, 'SF Mono', 'JetBrains Mono', monospace;
+  color: #C084FC;
+  width: 1ch;
+  display: inline-block;
+  text-align: center;
 }
 
-.agent-thinking-dot span {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #C084FC;
-  animation: agent-dot-pulse 1.2s ease-in-out infinite;
-}
-
-.agent-thinking-dot span:nth-child(2) { animation-delay: 0.15s; }
-.agent-thinking-dot span:nth-child(3) { animation-delay: 0.3s; }
-
-@keyframes agent-dot-pulse {
-  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
-  40% { opacity: 1; transform: scale(1); }
+.agent-thinking-text {
+  color: #888;
 }
 
 /* ── Tool execution blocks ── */
@@ -667,6 +657,17 @@ html, body {
 .agent-banner-exit:hover {
   color: #CCC;
   background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Streaming code blocks ── */
+.agent-text pre.streaming {
+  border-left: 2px solid #C084FC;
+  animation: code-stream-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes code-stream-pulse {
+  0%, 100% { border-left-color: rgba(192, 132, 252, 0.8); }
+  50%      { border-left-color: rgba(192, 132, 252, 0.25); }
 }
 
 /* ── Toast ── */
