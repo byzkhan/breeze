@@ -297,9 +297,13 @@ fn get_api_key() -> Result<String, String> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| "HOME or USERPROFILE not set".to_string())?;
     let path = std::path::PathBuf::from(home).join(".breeze").join("api_key");
-    std::fs::read_to_string(&path)
+    let key = std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())
-        .map_err(|_| "No API key configured. Place your key in ~/.breeze/api_key".to_string())
+        .map_err(|_| "No API key configured. Place your key in ~/.breeze/api_key".to_string())?;
+    if key.is_empty() {
+        return Err("No API key configured. Place your key in ~/.breeze/api_key".to_string());
+    }
+    Ok(key)
 }
 
 #[tauri::command]
