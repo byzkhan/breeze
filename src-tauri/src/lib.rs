@@ -173,10 +173,9 @@ fn spawn_shell(app: AppHandle, tab_id: String, rows: u16, cols: u16) -> Result<(
 fn write_pty(app: AppHandle, tab_id: String, data: String) -> Result<(), String> {
     let state = app.state::<PtyState>();
     let mut sessions = state.sessions.lock().unwrap();
-    if let Some(session) = sessions.get_mut(&tab_id) {
-        session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-        session.writer.flush().map_err(|e| e.to_string())?;
-    }
+    let session = sessions.get_mut(&tab_id).ok_or_else(|| format!("Session not found: {}", tab_id))?;
+    session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    session.writer.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
