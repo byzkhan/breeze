@@ -164,9 +164,9 @@ function looksLikeEnglish(input) {
 }
 
 // Erase any previously written AI lines from the terminal
-function clearAiLines() {
+function clearAiLines(tabId) {
   if (aiLineCount <= 0) return;
-  const tab = tabs.get(activeTabId);
+  const tab = tabs.get(tabId);
   if (!tab) return;
   // Move up and clear each line we wrote
   for (let i = 0; i < aiLineCount; i++) {
@@ -178,15 +178,15 @@ function clearAiLines() {
 }
 
 // Write AI status/suggestion inline in the terminal (like Claude Code)
-function writeAiLines(lines) {
-  const tab = tabs.get(activeTabId);
+function writeAiLines(tabId, lines) {
+  const tab = tabs.get(tabId);
   if (!tab) return;
-  clearAiLines();
+  clearAiLines(tabId);
   tab.term.write("\r\n" + lines.join("\r\n"));
   aiLineCount = lines.length;
 }
 
-function showSuggestion(command, explanation, dangerous) {
+function showSuggestion(tabId, command, explanation, dangerous) {
   pendingCommand = command;
   const icon = dangerous ? "\x1b[31m\u26A0\x1b[0m" : "\x1b[32m\u2713\x1b[0m";
   const cmdColor = dangerous ? "\x1b[31m" : "\x1b[36m";
@@ -195,37 +195,58 @@ function showSuggestion(command, explanation, dangerous) {
     `  \x1b[90m${explanation}\x1b[0m`,
     `  \x1b[90mEnter to run \u00B7 Escape to cancel\x1b[0m`,
   ];
-  writeAiLines(lines);
+  writeAiLines(tabId, lines);
   aiMode = true;
 }
 
-function showLoading() {
-  writeAiLines(["  \x1b[33m\u2731\x1b[0m \x1b[38;5;209mThinking\u2026\x1b[0m"]);
+function showLoading(tabId) {
+  writeAiLines(tabId, ["  \x1b[33m\u2731\x1b[0m \x1b[38;5;209mThinking\u2026\x1b[0m"]);
   aiMode = true;
 }
 
-function hideSuggestion() {
-  clearAiLines();
+function hideSuggestion(tabId) {
+  clearAiLines(tabId);
   aiMode = false;
   pendingCommand = null;
 }
 
-async function handleEnglishInput(text) {
-  showLoading();
+async function handleEnglishInput(tabId, text) {
+  // Verify tab exists before starting
+  if (!tabs.has(tabId)) return;
+
+  showLoading(tabId);
 
   try {
     let cwd = "~";
     try {
-      cwd = await invoke("get_shell_cwd", { tabId: activeTabId });
+      cwd = await invoke("get_shell_cwd", { tabId });
     } catch (_) {}
+
+    // Check if tab still exists and is still active after await
+    if (!tabs.has(tabId) || activeTabId !== tabId) {
+      hideSuggestion(tabId);
+      return;
+    }
 
     const history = recentCommands.slice(-5);
     const raw = await invoke("translate_command", { prompt: text, cwd, history });
+
+    // Check if tab still exists and is still active after await
+    if (!tabs.has(tabId) || activeTabId !== tabId) {
+      hideSuggestion(tabId);
+      return;
+    }
+
     const cleaned = raw.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
     const result = JSON.parse(cleaned);
-    showSuggestion(result.command, result.explanation, result.dangerous);
+    showSuggestion(tabId, result.command, result.explanation, result.dangerous);
   } catch (err) {
-    showSuggestion("Error: " + err, "Failed to translate", false);
+    // Check if tab still exists before showing error
+    if (!tabs.has(tabId) || activeTabId !== tabId) {
+      hideSuggestion(tabId);
+      return;
+    }
+    showSuggestion(tabId, "Error: " + err, "Failed to translate", false);
   }
 }
 
@@ -672,14 +693,14 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
       e.preventDefault();
       if (pendingCommand && !pendingCommand.startsWith("Error:")) {
         const cmd = pendingCommand;
-        hideSuggestion();
+        hideSuggestion(activeTabId);
         recentCommands.push(cmd);
         if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
         invoke("write_pty", { tabId: activeTabId, data: "\x15" + cmd + "\r" });
         tab.atPrompt = false;
         hideEditor(tabId);
       } else {
-        hideSuggestion();
+        hideSuggestion(activeTabId);
         invoke("write_pty", { tabId: activeTabId, data: "\x03" });
       }
       textarea.value = "";
@@ -689,7 +710,7 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
     }
     if (e.key === "Escape" || (e.key === "n" && !e.metaKey && !e.ctrlKey)) {
       e.preventDefault();
-      hideSuggestion();
+      hideSuggestion(activeTabId);
       invoke("write_pty", { tabId: activeTabId, data: "\x03" });
       textarea.value = "";
       updateHighlight(textarea, codeEl);
@@ -731,7 +752,7 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
 
     // 4. English input → single-command translate
     if (looksLikeEnglish(text)) {
-      handleEnglishInput(trimmed);
+      handleEnglishInput(tabId, trimmed);
       return;
     }
 
@@ -1321,7 +1342,7 @@ function showToast(msg, duration = 3000) {
 // ── Launcher bar ──
 document.querySelectorAll(".launcher-btn").forEach((btn) => {
   btn.addEventListener("click", async () => {
-    if (aiMode) hideSuggestion();
+    if (aiMode) hideSuggestion(activeTabId);
     if (!activeTabId) return;
 
     const cmd = btn.getAttribute("data-cmd");
