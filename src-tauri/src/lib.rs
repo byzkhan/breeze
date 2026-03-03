@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use serde_json::json;
 use futures::StreamExt;
@@ -318,7 +319,10 @@ async fn translate_command(prompt: String, cwd: String, history: Vec<String>) ->
         }
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let res = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", &api_key)
@@ -455,7 +459,10 @@ async fn agent_chat(
     messages.push(json!({"role": "user", "content": message}));
 
     let mut full_text = String::new();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
 
     // Agentic loop — up to 15 tool-use iterations
     for _iteration in 0..15 {
