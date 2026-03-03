@@ -155,6 +155,11 @@ function looksLikeEnglish(input) {
     return false;
   }
 
+  // Require at least one English indicator word to reduce false positives
+  const lowerWords = words.map(w => w.toLowerCase());
+  const hasEnglish = lowerWords.some(w => ENGLISH_INDICATORS.has(w));
+  if (!hasEnglish) return false;
+
   return true;
 }
 

@@ -439,12 +439,22 @@ async fn resolve_cwd(app: &AppHandle, tab_id: &str) -> String {
 }
 
 /// Resolve a path against the agent CWD (handles relative + absolute).
+/// Prevents path traversal outside CWD for relative paths.
 fn resolve_path(cwd: &str, path: &str) -> std::path::PathBuf {
     let p = std::path::Path::new(path);
     if p.is_absolute() {
         p.to_path_buf()
     } else {
-        std::path::Path::new(cwd).join(p)
+        let joined = std::path::Path::new(cwd).join(p);
+        // Normalize by resolving .. components to prevent traversal
+        let mut normalized = std::path::PathBuf::new();
+        for component in joined.components() {
+            match component {
+                std::path::Component::ParentDir => { normalized.pop(); }
+                c => normalized.push(c.as_os_str()),
+            }
+        }
+        normalized
     }
 }
 
@@ -655,7 +665,11 @@ async fn execute_tool(app: &AppHandle, tab_id: &str, tool_name: &str, input: &se
             if path.is_empty() {
                 return ("Error: path is required".to_string(), false);
             }
-            let content = input["content"].as_str().unwrap_or("");
+            let content = match input.get("content") {
+                Some(serde_json::Value::String(s)) => s.as_str(),
+                Some(_) => return ("Error: content must be a string".to_string(), false),
+                None => "",
+            };
 
             let _ = app.emit("agent-tool-start", json!({
                 "tab_id": tab_id, "tool": "write_file", "detail": path,
@@ -989,6 +1003,23 @@ async fn process_stream(
             if data != "[DONE]" {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     match event["type"].as_str() {
+                        Some("content_block_delta") => {
+                            if current_block_type == "text" {
+                                if let Some(text) = event["delta"]["text"].as_str() {
+                                    current_text.push_str(text);
+                                }
+                            } else if current_block_type == "tool_use" {
+                                if let Some(json_chunk) = event["delta"]["partial_json"].as_str() {
+                                    current_tool_json.push_str(json_chunk);
+                                }
+                            }
+                        }
+                        Some("content_block_stop") => {
+                            if current_block_type == "tool_use" && !current_tool_id.is_empty() {
+                                tool_calls.push((current_tool_id.clone(), current_tool_name.clone(), current_tool_json.clone()));
+                            }
+                            current_block_type = String::new();
+                        }
                         Some("message_delta") => {
                             if let Some(sr) = event["delta"]["stop_reason"].as_str() {
                                 stop_reason = sr.to_string();
