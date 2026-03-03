@@ -934,6 +934,8 @@ function showEditor(tabId) {
 
   // Re-fit xterm since available height changed
   requestAnimationFrame(() => {
+    if (!tabs.has(tabId)) return;
+    const tab = tabs.get(tabId);
     tab.fitAddon.fit();
     if (textarea && tabId === activeTabId) textarea.focus();
   });
@@ -948,6 +950,7 @@ function hideEditor(tabId) {
   // Re-fit xterm since available height changed
   requestAnimationFrame(() => {
     if (!tabs.has(tabId)) return;
+    const tab = tabs.get(tabId);
     tab.fitAddon.fit();
   });
 }
@@ -1047,10 +1050,12 @@ function createTab() {
   switchTab(tabId);
 
   requestAnimationFrame(() => {
-    fitAddon.fit();
+    if (!tabs.has(tabId)) return;
+    const tab = tabs.get(tabId);
+    tab.fitAddon.fit();
     // Bottom-up flow: push cursor to last row so first prompt appears at bottom
-    term.write("\r\n".repeat(Math.max(0, term.rows - 1)));
-    invoke("spawn_shell", { tabId, rows: term.rows, cols: term.cols });
+    tab.term.write("\r\n".repeat(Math.max(0, tab.term.rows - 1)));
+    invoke("spawn_shell", { tabId, rows: tab.term.rows, cols: tab.term.cols });
   });
 
   // Wire terminal input
@@ -1126,6 +1131,8 @@ function switchTab(tabId) {
   }
 
   requestAnimationFrame(() => {
+    if (!tabs.has(tabId)) return;
+    const tab = tabs.get(tabId);
     tab.fitAddon.fit();
     if (tab.atPrompt && tab.editorEl) {
       const textarea = tab.editorEl.querySelector(".input-editor-textarea");
