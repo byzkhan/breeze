@@ -287,6 +287,7 @@ fn resume_pty(app: AppHandle, tab_id: String) -> Result<(), String> {
 fn get_api_key() -> Result<String, String> {
     // 1. Compile-time embedded key
     if let Some(key) = option_env!("BREEZE_API_KEY") {
+        let key = key.trim();
         if !key.is_empty() {
             return Ok(key.to_string());
         }
