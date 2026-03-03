@@ -605,6 +605,9 @@ async fn agent_chat(
 
         // If stop_reason is tool_use, execute tools and loop
         if stop_reason == "tool_use" {
+            if tool_calls.is_empty() {
+                break;
+            }
             let mut tool_results: Vec<serde_json::Value> = vec![];
 
             for (id, name, input_json) in &tool_calls {
