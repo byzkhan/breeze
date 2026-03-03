@@ -9,15 +9,34 @@
     <script type="module" src="dist/main.js" defer></script>
   </head>
   <body>
-    <div id="command-bar">
-      <span class="bar-label">Breeze</span>
+    <div id="drag-handle">
+      <div id="context-bar">
+        <span id="ctx-cwd" class="ctx-item">
+          <span class="ctx-icon">&#xF07C;</span>
+          <span id="ctx-cwd-text">~</span>
+        </span>
+        <span id="ctx-git" class="ctx-item" style="display:none;">
+          <span class="ctx-icon">&#xE0A0;</span>
+          <span id="ctx-git-text"></span>
+        </span>
+        <span id="ctx-node" class="ctx-item" style="display:none;">
+          <span class="ctx-icon">&#x2B22;</span>
+          <span id="ctx-node-text"></span>
+        </span>
+      </div>
     </div>
-    <div id="context-bar">
-      <span class="bar-label" id="context-label">~</span>
+    <div id="tab-bar">
+      <div id="tabs-container"></div>
+      <button id="new-tab-btn">+</button>
     </div>
     <div id="terminal-container"></div>
     <div id="launcher-bar">
-      <button class="launcher-btn" id="btn-new-tab">+ New Tab</button>
+      <button class="launcher-btn" data-cmd="claude" data-label="Claude Code">🤖 Claude Code</button>
+      <button class="launcher-btn" data-cmd="codex" data-label="Codex">🧠 Codex</button>
+      <button class="launcher-btn" data-cmd="npm install" data-label="npm install">📦 npm install</button>
+      <button class="launcher-btn" data-cmd="npm run dev" data-label="Dev Server">▶️ Dev Server</button>
     </div>
+    <div id="toast" style="display:none;"></div>
+
   </body>
 </html>
