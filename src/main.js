@@ -99,6 +99,7 @@ function scheduleFlush() {
 
 let inputBuffer = "";
 let aiMode = false;
+let aiRequestId = 0;
 let pendingCommand = null;
 let aiLineCount = 0; // how many terminal lines the AI indicator occupies
 
@@ -207,6 +208,7 @@ function showLoading(tabId) {
 function hideSuggestion(tabId) {
   clearAiLines(tabId);
   aiMode = false;
+  aiRequestId++; // Invalidate any in-flight requests
   pendingCommand = null;
 }
 
@@ -214,6 +216,7 @@ async function handleEnglishInput(tabId, text) {
   // Verify tab exists before starting
   if (!tabs.has(tabId)) return;
 
+  const currentRequestId = aiRequestId;
   showLoading(tabId);
 
   try {
@@ -222,18 +225,16 @@ async function handleEnglishInput(tabId, text) {
       cwd = await invoke("get_shell_cwd", { tabId });
     } catch (_) {}
 
-    // Check if tab still exists and is still active after await
-    if (!tabs.has(tabId) || activeTabId !== tabId) {
-      hideSuggestion(tabId);
+    // Check if request was cancelled or tab changed
+    if (currentRequestId !== aiRequestId || !tabs.has(tabId) || activeTabId !== tabId) {
       return;
     }
 
     const history = recentCommands.slice(-5);
     const raw = await invoke("translate_command", { prompt: text, cwd, history });
 
-    // Check if tab still exists and is still active after await
-    if (!tabs.has(tabId) || activeTabId !== tabId) {
-      hideSuggestion(tabId);
+    // Check if request was cancelled or tab changed
+    if (currentRequestId !== aiRequestId || !tabs.has(tabId) || activeTabId !== tabId) {
       return;
     }
 
@@ -241,9 +242,8 @@ async function handleEnglishInput(tabId, text) {
     const result = JSON.parse(cleaned);
     showSuggestion(tabId, result.command, result.explanation, result.dangerous);
   } catch (err) {
-    // Check if tab still exists before showing error
-    if (!tabs.has(tabId) || activeTabId !== tabId) {
-      hideSuggestion(tabId);
+    // Check if request was cancelled or tab changed
+    if (currentRequestId !== aiRequestId || !tabs.has(tabId) || activeTabId !== tabId) {
       return;
     }
     showSuggestion(tabId, "Error: " + err, "Failed to translate", false);
