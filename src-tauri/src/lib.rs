@@ -444,6 +444,7 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => { normalized.pop(); }
+            std::path::Component::CurDir => { /* skip . */ }
             c => normalized.push(c.as_os_str()),
         }
     }
@@ -970,7 +971,7 @@ async fn process_stream(
     response: reqwest::Response,
 ) -> Result<(String, Vec<(String, String, String)>, String), String> {
     let mut stream = response.bytes_stream();
-    let mut sse_buf = String::new();
+    let mut sse_bytes: Vec<u8> = Vec::new(); // raw byte buffer — avoids UTF-8 boundary corruption
     let mut current_text = String::new();
     let mut current_block_type = String::new();
     let mut current_tool_id = String::new();
@@ -981,11 +982,14 @@ async fn process_stream(
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| e.to_string())?;
-        sse_buf.push_str(&String::from_utf8_lossy(&chunk));
+        sse_bytes.extend_from_slice(&chunk);
 
-        while let Some(line_end) = sse_buf.find('\n') {
-            let line = sse_buf[..line_end].trim_end_matches('\r').to_string();
-            sse_buf = sse_buf[line_end + 1..].to_string();
+        while let Some(newline_pos) = sse_bytes.iter().position(|&b| b == b'\n') {
+            let mut line_bytes = sse_bytes[..newline_pos].to_vec();
+            sse_bytes = sse_bytes[newline_pos + 1..].to_vec();
+            // Strip trailing \r
+            if line_bytes.last() == Some(&b'\r') { line_bytes.pop(); }
+            let line = String::from_utf8_lossy(&line_bytes).to_string();
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" { continue; }
@@ -1036,8 +1040,11 @@ async fn process_stream(
     }
 
     // Post-loop finalization: parse any trailing data left in the SSE buffer
-    if !sse_buf.is_empty() {
-        let line = sse_buf.trim_end_matches('\r').trim_end_matches('\n');
+    if !sse_bytes.is_empty() {
+        // Trim trailing whitespace bytes
+        while sse_bytes.last().map_or(false, |&b| b == b'\r' || b == b'\n') { sse_bytes.pop(); }
+        let line = String::from_utf8_lossy(&sse_bytes);
+        let line = line.as_ref();
         if let Some(data) = line.strip_prefix("data: ") {
             if data != "[DONE]" {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
