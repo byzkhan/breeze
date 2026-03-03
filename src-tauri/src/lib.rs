@@ -213,6 +213,13 @@ fn get_shell_cwd(app: AppHandle, tab_id: String) -> Result<String, String> {
     let session = sessions.get(&tab_id).ok_or("Tab not found")?;
     let pid = session.child_pid.ok_or("Shell not started")?;
 
+    get_process_cwd(pid)
+}
+
+/// Gets the current working directory of a process by PID.
+/// Unix implementation using lsof command.
+#[cfg(unix)]
+fn get_process_cwd(pid: u32) -> Result<String, String> {
     let output = std::process::Command::new("lsof")
         .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
         .output()
@@ -226,6 +233,198 @@ fn get_shell_cwd(app: AppHandle, tab_id: String) -> Result<String, String> {
     }
 
     Err("Could not determine shell CWD".to_string())
+}
+
+/// Gets the current working directory of a process by PID.
+/// Windows implementation using Windows API.
+#[cfg(windows)]
+fn get_process_cwd(pid: u32) -> Result<String, String> {
+    use std::mem;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+
+    // Windows structures needed for reading PEB
+    #[repr(C)]
+    struct ProcessBasicInformation {
+        reserved1: *mut std::ffi::c_void,
+        peb_base_address: *mut Peb,
+        reserved2: [*mut std::ffi::c_void; 2],
+        unique_process_id: usize,
+        reserved3: *mut std::ffi::c_void,
+    }
+
+    #[repr(C)]
+    struct Peb {
+        reserved1: [u8; 2],
+        being_debugged: u8,
+        reserved2: [u8; 1],
+        reserved3: [*mut std::ffi::c_void; 2],
+        ldr: *mut std::ffi::c_void,
+        process_parameters: *mut RtlUserProcessParameters,
+    }
+
+    #[repr(C)]
+    struct RtlUserProcessParameters {
+        reserved1: [u8; 16],
+        reserved2: [*mut std::ffi::c_void; 10],
+        image_path_name: UnicodeString,
+        command_line: UnicodeString,
+        environment: *mut std::ffi::c_void,
+        starting_x: u32,
+        starting_y: u32,
+        count_x: u32,
+        count_y: u32,
+        count_chars_x: u32,
+        count_chars_y: u32,
+        fill_attribute: u32,
+        window_flags: u32,
+        show_window_flags: u32,
+        reserved3: UnicodeString,
+        current_directory: CurDir,
+    }
+
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *mut u16,
+    }
+
+    #[repr(C)]
+    struct CurDir {
+        dos_path: UnicodeString,
+        handle: HANDLE,
+    }
+
+    // NtQueryInformationProcess is not in windows-sys, we need to load it dynamically
+    type NtQueryInformationProcessFn = unsafe extern "system" fn(
+        ProcessHandle: HANDLE,
+        ProcessInformationClass: u32,
+        ProcessInformation: *mut std::ffi::c_void,
+        ProcessInformationLength: u32,
+        ReturnLength: *mut u32,
+    ) -> i32;
+
+    const PROCESS_BASIC_INFORMATION_CLASS: u32 = 0;
+
+    unsafe {
+        // Load ntdll.dll and get NtQueryInformationProcess
+        let ntdll = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(
+            b"ntdll.dll\0".as_ptr(),
+        );
+        if ntdll == 0 {
+            return Err("Failed to load ntdll.dll".to_string());
+        }
+
+        let proc_addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+            ntdll,
+            b"NtQueryInformationProcess\0".as_ptr(),
+        );
+        if proc_addr.is_none() {
+            return Err("Failed to get NtQueryInformationProcess address".to_string());
+        }
+
+        let nt_query_information_process: NtQueryInformationProcessFn =
+            mem::transmute(proc_addr.unwrap());
+
+        // Open the target process
+        let process_handle = OpenProcess(
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+            0, // FALSE
+            pid,
+        );
+
+        if process_handle == INVALID_HANDLE_VALUE || process_handle == 0 {
+            return Err(format!("Failed to open process {}", pid));
+        }
+
+        // Ensure we close the handle when done
+        struct HandleGuard(HANDLE);
+        impl Drop for HandleGuard {
+            fn drop(&mut self) {
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+        let _guard = HandleGuard(process_handle);
+
+        // Get process basic information (contains PEB address)
+        let mut pbi: ProcessBasicInformation = mem::zeroed();
+        let mut return_length: u32 = 0;
+        let status = nt_query_information_process(
+            process_handle,
+            PROCESS_BASIC_INFORMATION_CLASS,
+            &mut pbi as *mut _ as *mut std::ffi::c_void,
+            mem::size_of::<ProcessBasicInformation>() as u32,
+            &mut return_length,
+        );
+
+        if status != 0 {
+            return Err(format!("NtQueryInformationProcess failed with status {}", status));
+        }
+
+        // Read PEB from target process
+        let mut peb: Peb = mem::zeroed();
+        let mut bytes_read: usize = 0;
+        let success = ReadProcessMemory(
+            process_handle,
+            pbi.peb_base_address as *const std::ffi::c_void,
+            &mut peb as *mut _ as *mut std::ffi::c_void,
+            mem::size_of::<Peb>(),
+            &mut bytes_read,
+        );
+
+        if success == 0 {
+            return Err("Failed to read PEB".to_string());
+        }
+
+        // Read RTL_USER_PROCESS_PARAMETERS from target process
+        let mut params: RtlUserProcessParameters = mem::zeroed();
+        let success = ReadProcessMemory(
+            process_handle,
+            peb.process_parameters as *const std::ffi::c_void,
+            &mut params as *mut _ as *mut std::ffi::c_void,
+            mem::size_of::<RtlUserProcessParameters>(),
+            &mut bytes_read,
+        );
+
+        if success == 0 {
+            return Err("Failed to read process parameters".to_string());
+        }
+
+        // Read the current directory string from target process
+        let cwd_length = params.current_directory.dos_path.length as usize;
+        if cwd_length == 0 || cwd_length > 32768 {
+            return Err("Invalid current directory length".to_string());
+        }
+
+        let mut cwd_buffer: Vec<u16> = vec![0; cwd_length / 2 + 1];
+        let success = ReadProcessMemory(
+            process_handle,
+            params.current_directory.dos_path.buffer as *const std::ffi::c_void,
+            cwd_buffer.as_mut_ptr() as *mut std::ffi::c_void,
+            cwd_length,
+            &mut bytes_read,
+        );
+
+        if success == 0 {
+            return Err("Failed to read current directory string".to_string());
+        }
+
+        // Convert UTF-16 to String
+        let cwd = String::from_utf16_lossy(&cwd_buffer[..bytes_read / 2]);
+        // Remove trailing backslash if present (except for root paths like "C:\")
+        let cwd = cwd.trim_end_matches('\0').to_string();
+        let cwd = if cwd.len() > 3 && cwd.ends_with('\\') {
+            cwd[..cwd.len() - 1].to_string()
+        } else {
+            cwd
+        };
+
+        Ok(cwd)
+    }
 }
 
 #[tauri::command]
@@ -259,11 +458,22 @@ fn get_node_version() -> Result<String, String> {
 
 #[tauri::command]
 fn check_command_exists(command: String) -> bool {
-    std::process::Command::new("which")
-        .arg(&command)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        std::process::Command::new("which")
+            .arg(&command)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("where.exe")
+            .arg(&command)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
 }
 
 #[tauri::command]
@@ -370,41 +580,48 @@ async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Resu
             sessions.get(tab_id).and_then(|s| s.child_pid)
         }; // Lock released here
 
-        // Run lsof command outside the lock scope
-        let mut found_cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        if let Some(pid) = child_pid {
-            if let Ok(output) = tokio::process::Command::new("lsof")
-                .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
-                .output()
-                .await
-            {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    if let Some(path) = line.strip_prefix('n') {
-                        found_cwd = path.to_string();
-                        break;
-                    }
-                }
-            }
+        // Get CWD using cross-platform helper, with fallback to home directory
+        let default_cwd = get_default_home_dir();
+        match child_pid {
+            Some(pid) => get_process_cwd(pid).unwrap_or(default_cwd),
+            None => default_cwd,
         }
-        found_cwd
     };
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    #[cfg(unix)]
+    let result = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::process::Command::new(&shell)
+                .arg("-c")
+                .arg(command)
+                .current_dir(&cwd)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output(),
+        )
+        .await
+    };
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        tokio::process::Command::new(&shell)
-            .arg("-c")
-            .arg(command)
-            .current_dir(&cwd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output(),
-    )
-    .await
-    .map_err(|_| "Command timed out after 30 seconds".to_string())?
-    .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    let result = {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::process::Command::new("cmd.exe")
+                .arg("/C")
+                .arg(command)
+                .current_dir(&cwd)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output(),
+        )
+        .await
+    };
+
+    let result = result
+        .map_err(|_| "Command timed out after 30 seconds".to_string())?
+        .map_err(|e| e.to_string())?;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -433,6 +650,18 @@ async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Resu
     }
 
     Ok(output)
+}
+
+/// Returns the default home directory for the current platform.
+fn get_default_home_dir() -> String {
+    #[cfg(unix)]
+    {
+        std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string())
+    }
 }
 
 #[tauri::command]
