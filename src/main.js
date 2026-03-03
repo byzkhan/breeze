@@ -723,15 +723,15 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
       e.preventDefault();
       if (tab.pendingCommand && !tab.pendingCommand.startsWith("Error:")) {
         const cmd = tab.pendingCommand;
-        hideSuggestion(activeTabId);
+        hideSuggestion(tabId);
         recentCommands.push(cmd);
         if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
-        invoke("write_pty", { tabId: activeTabId, data: "\x15" + cmd + "\r" });
+        invoke("write_pty", { tabId, data: "\x15" + cmd + "\r" });
         tab.atPrompt = false;
         hideEditor(tabId);
       } else {
-        hideSuggestion(activeTabId);
-        invoke("write_pty", { tabId: activeTabId, data: "\x03" });
+        hideSuggestion(tabId);
+        invoke("write_pty", { tabId, data: "\x03" });
       }
       textarea.value = "";
       updateHighlight(textarea, codeEl);
@@ -740,8 +740,8 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
     }
     if (e.key === "Escape" || (e.key === "n" && !e.metaKey && !e.ctrlKey)) {
       e.preventDefault();
-      hideSuggestion(activeTabId);
-      invoke("write_pty", { tabId: activeTabId, data: "\x03" });
+      hideSuggestion(tabId);
+      invoke("write_pty", { tabId, data: "\x03" });
       textarea.value = "";
       updateHighlight(textarea, codeEl);
       autoResizeEditor(textarea);
