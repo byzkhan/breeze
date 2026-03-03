@@ -1411,9 +1411,11 @@ document.querySelectorAll(".launcher-btn").forEach((btn) => {
       hideEditor(tabId);
     }
 
-    invoke("write_pty", { tabId: tabId, data: "\x15" + cmd + "\r" });
-    recentCommands.push(cmd);
-    if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
+    if (tab) {
+      invoke("write_pty", { tabId: tabId, data: "\x15" + cmd + "\r" });
+      recentCommands.push(cmd);
+      if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
+    }
   });
 });
 
