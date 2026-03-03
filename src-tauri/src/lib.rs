@@ -468,6 +468,7 @@ async fn agent_chat(
         .map_err(|e| e.to_string())?;
 
     // Agentic loop — up to 15 tool-use iterations
+    let mut exhausted_iterations = true;
     for _iteration in 0..15 {
         let res = client
             .post("https://api.anthropic.com/v1/messages")
@@ -598,6 +599,7 @@ async fn agent_chat(
             }));
         }
         if assistant_content.is_empty() {
+            exhausted_iterations = false;
             break;
         }
         messages.push(json!({"role": "assistant", "content": assistant_content}));
@@ -605,6 +607,7 @@ async fn agent_chat(
         // If stop_reason is tool_use, execute tools and loop
         if stop_reason == "tool_use" {
             if tool_calls.is_empty() {
+                exhausted_iterations = false;
                 break;
             }
             let mut tool_results: Vec<serde_json::Value> = vec![];
@@ -664,7 +667,13 @@ async fn agent_chat(
         }
 
         // stop_reason is "end_turn" — we're done
+        exhausted_iterations = false;
         break;
+    }
+
+    // Check if the loop exhausted all iterations without reaching end_turn
+    if exhausted_iterations {
+        full_text.push_str("\n\n⚠️ Agent reached maximum iteration limit (15 turns). The task may be incomplete.");
     }
 
     Ok(full_text)
