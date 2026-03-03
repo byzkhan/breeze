@@ -451,7 +451,14 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Resolve a path against the agent CWD and verify it stays within CWD.
+/// Rejects empty or root-level CWD to prevent sandbox bypass.
 fn resolve_path(cwd: &str, path: &str) -> Result<std::path::PathBuf, String> {
+    let cwd_normalized = normalize_path(std::path::Path::new(cwd));
+    // Reject empty or root CWD — too permissive for sandbox
+    if cwd.is_empty() || cwd_normalized == std::path::Path::new("/") {
+        return Err("Cannot resolve path: working directory is not set or is root".to_string());
+    }
+
     let p = std::path::Path::new(path);
     let resolved = if p.is_absolute() {
         normalize_path(p)
@@ -459,7 +466,6 @@ fn resolve_path(cwd: &str, path: &str) -> Result<std::path::PathBuf, String> {
         normalize_path(&std::path::Path::new(cwd).join(p))
     };
 
-    let cwd_normalized = normalize_path(std::path::Path::new(cwd));
     if !resolved.starts_with(&cwd_normalized) {
         return Err(format!("Path '{}' resolves outside working directory", path));
     }
@@ -570,7 +576,7 @@ fn execute_read_file(cwd: &str, path: &str, offset: Option<u32>, limit: Option<u
     let total = lines.len();
     let start = offset.unwrap_or(0) as usize;
     let count = limit.unwrap_or(500) as usize;
-    let end = (start + count).min(total);
+    let end = start.saturating_add(count).min(total);
 
     if start >= total {
         return (format!("{} has {total} lines, offset {start} is past end", resolved.display()), false);
@@ -640,11 +646,14 @@ fn execute_edit_file(cwd: &str, path: &str, old_string: &str, new_string: &str) 
 
 /// Dispatch tool execution.
 async fn execute_tool(app: &AppHandle, tab_id: &str, tool_name: &str, input: &serde_json::Value) -> (String, bool) {
-    // Get CWD from agent state
+    // Get CWD from agent state — require valid state
     let cwd = {
         let state = app.state::<AgentStates>();
         let states = state.states.lock().unwrap();
-        states.get(tab_id).map(|s| s.cwd.clone()).unwrap_or_else(|| "/".to_string())
+        match states.get(tab_id) {
+            Some(s) if !s.cwd.is_empty() && s.cwd != "/" => s.cwd.clone(),
+            _ => return ("Error: agent state not initialized or CWD is invalid".to_string(), false),
+        }
     };
 
     match tool_name {
@@ -676,12 +685,16 @@ async fn execute_tool(app: &AppHandle, tab_id: &str, tool_name: &str, input: &se
                 "tab_id": tab_id, "tool": "read_file", "detail": path,
             }));
             let (output, success) = execute_read_file(&cwd, path, offset, limit);
+            let output_preview = {
+                let char_count = output.chars().count();
+                if char_count > 500 {
+                    let trunc_at = output.char_indices().nth(500).map(|(i, _)| i).unwrap_or(output.len());
+                    format!("{}... ({} chars total)", &output[..trunc_at], char_count)
+                } else { output.clone() }
+            };
             let _ = app.emit("agent-tool-end", json!({
                 "tab_id": tab_id, "tool": "read_file", "detail": path,
-                "output": if output.chars().count() > 500 {
-                    let trunc_at = output.char_indices().nth(500).map(|(i, _)| i).unwrap_or(output.len());
-                    format!("{}... ({} chars)", &output[..trunc_at], output.len())
-                } else { output.clone() },
+                "output": output_preview,
                 "success": success,
             }));
             (output, success)
