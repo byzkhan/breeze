@@ -152,9 +152,6 @@ function looksLikeEnglish(input) {
   if (/[|><;&$`\\]/.test(first)) return false;
 
   if (KNOWN_COMMANDS.has(first)) {
-    const rest = words.slice(1).map(w => w.toLowerCase());
-    if (rest.some(w => ENGLISH_INDICATORS.has(w))) return true;
-    if (words.length >= 5 && !trimmed.includes("-")) return true;
     return false;
   }
 
@@ -723,15 +720,15 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
       e.preventDefault();
       if (tab.pendingCommand && !tab.pendingCommand.startsWith("Error:")) {
         const cmd = tab.pendingCommand;
-        hideSuggestion(activeTabId);
+        hideSuggestion(tabId);
         recentCommands.push(cmd);
         if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
-        invoke("write_pty", { tabId: activeTabId, data: "\x15" + cmd + "\r" });
+        invoke("write_pty", { tabId, data: "\x15" + cmd + "\r" });
         tab.atPrompt = false;
         hideEditor(tabId);
       } else {
-        hideSuggestion(activeTabId);
-        invoke("write_pty", { tabId: activeTabId, data: "\x03" });
+        hideSuggestion(tabId);
+        invoke("write_pty", { tabId, data: "\x03" });
       }
       textarea.value = "";
       updateHighlight(textarea, codeEl);
@@ -740,8 +737,8 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
     }
     if (e.key === "Escape" || (e.key === "n" && !e.metaKey && !e.ctrlKey)) {
       e.preventDefault();
-      hideSuggestion(activeTabId);
-      invoke("write_pty", { tabId: activeTabId, data: "\x03" });
+      hideSuggestion(tabId);
+      invoke("write_pty", { tabId, data: "\x03" });
       textarea.value = "";
       updateHighlight(textarea, codeEl);
       autoResizeEditor(textarea);
@@ -934,6 +931,8 @@ function showEditor(tabId) {
 
   // Re-fit xterm since available height changed
   requestAnimationFrame(() => {
+    if (!tabs.has(tabId)) return;
+    const tab = tabs.get(tabId);
     tab.fitAddon.fit();
     if (textarea && tabId === activeTabId) textarea.focus();
   });
@@ -948,6 +947,7 @@ function hideEditor(tabId) {
   // Re-fit xterm since available height changed
   requestAnimationFrame(() => {
     if (!tabs.has(tabId)) return;
+    const tab = tabs.get(tabId);
     tab.fitAddon.fit();
   });
 }
@@ -1047,10 +1047,12 @@ function createTab() {
   switchTab(tabId);
 
   requestAnimationFrame(() => {
-    fitAddon.fit();
+    if (!tabs.has(tabId)) return;
+    const tab = tabs.get(tabId);
+    tab.fitAddon.fit();
     // Bottom-up flow: push cursor to last row so first prompt appears at bottom
-    term.write("\r\n".repeat(Math.max(0, term.rows - 1)));
-    invoke("spawn_shell", { tabId, rows: term.rows, cols: term.cols });
+    tab.term.write("\r\n".repeat(Math.max(0, tab.term.rows - 1)));
+    invoke("spawn_shell", { tabId, rows: tab.term.rows, cols: tab.term.cols });
   });
 
   // Wire terminal input
@@ -1126,6 +1128,8 @@ function switchTab(tabId) {
   }
 
   requestAnimationFrame(() => {
+    if (!tabs.has(tabId)) return;
+    const tab = tabs.get(tabId);
     tab.fitAddon.fit();
     if (tab.atPrompt && tab.editorEl) {
       const textarea = tab.editorEl.querySelector(".input-editor-textarea");
@@ -1331,8 +1335,9 @@ async function updateContextBar() {
   if (!tab) return;
   try {
     const cwd = await invoke("get_shell_cwd", { tabId: activeTabId });
-    if (cwd === tab.lastCwd) return;
-    tab.lastCwd = cwd;
+    const currentTab = tabs.get(activeTabId);
+    if (!currentTab || cwd === currentTab.lastCwd) return;
+    currentTab.lastCwd = cwd;
 
     ctxCwdText.textContent = friendlyCwd(cwd);
 
@@ -1403,9 +1408,11 @@ document.querySelectorAll(".launcher-btn").forEach((btn) => {
       hideEditor(tabId);
     }
 
-    invoke("write_pty", { tabId: tabId, data: "\x15" + cmd + "\r" });
-    recentCommands.push(cmd);
-    if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
+    if (tab) {
+      invoke("write_pty", { tabId: tabId, data: "\x15" + cmd + "\r" });
+      recentCommands.push(cmd);
+      if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
+    }
   });
 });
 
