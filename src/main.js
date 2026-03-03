@@ -1338,8 +1338,9 @@ async function updateContextBar() {
   if (!tab) return;
   try {
     const cwd = await invoke("get_shell_cwd", { tabId: activeTabId });
-    if (cwd === tab.lastCwd) return;
-    tab.lastCwd = cwd;
+    const currentTab = tabs.get(activeTabId);
+    if (!currentTab || cwd === currentTab.lastCwd) return;
+    currentTab.lastCwd = cwd;
 
     ctxCwdText.textContent = friendlyCwd(cwd);
 
