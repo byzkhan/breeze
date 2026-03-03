@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use serde_json::json;
 use futures::StreamExt;
@@ -172,10 +173,9 @@ fn spawn_shell(app: AppHandle, tab_id: String, rows: u16, cols: u16) -> Result<(
 fn write_pty(app: AppHandle, tab_id: String, data: String) -> Result<(), String> {
     let state = app.state::<PtyState>();
     let mut sessions = state.sessions.lock().unwrap();
-    if let Some(session) = sessions.get_mut(&tab_id) {
-        session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-        session.writer.flush().map_err(|e| e.to_string())?;
-    }
+    let session = sessions.get_mut(&tab_id).ok_or_else(|| format!("Session not found: {}", tab_id))?;
+    session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    session.writer.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -318,7 +318,10 @@ async fn translate_command(prompt: String, cwd: String, history: Vec<String>) ->
         }
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let res = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", &api_key)
@@ -351,21 +354,25 @@ async fn translate_command(prompt: String, cwd: String, history: Vec<String>) ->
 async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Result<String, String> {
     // Get CWD from the tab's shell process
     let cwd = {
-        let state = app.state::<PtyState>();
-        let sessions = state.sessions.lock().unwrap();
+        // Extract child_pid while holding the lock briefly
+        let child_pid = {
+            let state = app.state::<PtyState>();
+            let sessions = state.sessions.lock().unwrap();
+            sessions.get(tab_id).and_then(|s| s.child_pid)
+        }; // Lock released here
+
+        // Run lsof command outside the lock scope
         let mut found_cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        if let Some(session) = sessions.get(tab_id) {
-            if let Some(pid) = session.child_pid {
-                if let Ok(output) = std::process::Command::new("lsof")
-                    .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
-                    .output()
-                {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        if let Some(path) = line.strip_prefix('n') {
-                            found_cwd = path.to_string();
-                            break;
-                        }
+        if let Some(pid) = child_pid {
+            if let Ok(output) = std::process::Command::new("lsof")
+                .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(path) = line.strip_prefix('n') {
+                        found_cwd = path.to_string();
+                        break;
                     }
                 }
             }
@@ -455,9 +462,13 @@ async fn agent_chat(
     messages.push(json!({"role": "user", "content": message}));
 
     let mut full_text = String::new();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
 
     // Agentic loop — up to 15 tool-use iterations
+    let mut exhausted_iterations = true;
     for _iteration in 0..15 {
         let res = client
             .post("https://api.anthropic.com/v1/messages")
@@ -588,12 +599,17 @@ async fn agent_chat(
             }));
         }
         if assistant_content.is_empty() {
+            exhausted_iterations = false;
             break;
         }
         messages.push(json!({"role": "assistant", "content": assistant_content}));
 
         // If stop_reason is tool_use, execute tools and loop
         if stop_reason == "tool_use" {
+            if tool_calls.is_empty() {
+                exhausted_iterations = false;
+                break;
+            }
             let mut tool_results: Vec<serde_json::Value> = vec![];
 
             for (id, name, input_json) in &tool_calls {
@@ -651,7 +667,13 @@ async fn agent_chat(
         }
 
         // stop_reason is "end_turn" — we're done
+        exhausted_iterations = false;
         break;
+    }
+
+    // Check if the loop exhausted all iterations without reaching end_turn
+    if exhausted_iterations {
+        full_text.push_str("\n\n⚠️ Agent reached maximum iteration limit (15 turns). The task may be incomplete.");
     }
 
     Ok(full_text)

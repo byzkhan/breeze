@@ -98,9 +98,7 @@ function scheduleFlush() {
 }
 
 let inputBuffer = "";
-let aiMode = false;
-let pendingCommand = null;
-let aiLineCount = 0; // how many terminal lines the AI indicator occupies
+let aiRequestId = 0;
 
 const recentCommands = [];
 const MAX_HISTORY = 10;
@@ -164,30 +162,31 @@ function looksLikeEnglish(input) {
 }
 
 // Erase any previously written AI lines from the terminal
-function clearAiLines() {
-  if (aiLineCount <= 0) return;
-  const tab = tabs.get(activeTabId);
-  if (!tab) return;
+function clearAiLines(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab || tab.aiLineCount <= 0) return;
   // Move up and clear each line we wrote
-  for (let i = 0; i < aiLineCount; i++) {
+  for (let i = 0; i < tab.aiLineCount; i++) {
     tab.term.write("\x1b[2K\x1b[A");
   }
   // Move cursor to start of current line
   tab.term.write("\r");
-  aiLineCount = 0;
+  tab.aiLineCount = 0;
 }
 
 // Write AI status/suggestion inline in the terminal (like Claude Code)
-function writeAiLines(lines) {
-  const tab = tabs.get(activeTabId);
+function writeAiLines(tabId, lines) {
+  const tab = tabs.get(tabId);
   if (!tab) return;
-  clearAiLines();
+  clearAiLines(tabId);
   tab.term.write("\r\n" + lines.join("\r\n"));
-  aiLineCount = lines.length;
+  tab.aiLineCount = lines.length;
 }
 
-function showSuggestion(command, explanation, dangerous) {
-  pendingCommand = command;
+function showSuggestion(tabId, command, explanation, dangerous) {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+  tab.pendingCommand = command;
   const icon = dangerous ? "\x1b[31m\u26A0\x1b[0m" : "\x1b[32m\u2713\x1b[0m";
   const cmdColor = dangerous ? "\x1b[31m" : "\x1b[36m";
   const lines = [
@@ -195,37 +194,61 @@ function showSuggestion(command, explanation, dangerous) {
     `  \x1b[90m${explanation}\x1b[0m`,
     `  \x1b[90mEnter to run \u00B7 Escape to cancel\x1b[0m`,
   ];
-  writeAiLines(lines);
-  aiMode = true;
+  writeAiLines(tabId, lines);
+  tab.aiMode = true;
 }
 
-function showLoading() {
-  writeAiLines(["  \x1b[33m\u2731\x1b[0m \x1b[38;5;209mThinking\u2026\x1b[0m"]);
-  aiMode = true;
+function showLoading(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+  writeAiLines(tabId, ["  \x1b[33m\u2731\x1b[0m \x1b[38;5;209mThinking\u2026\x1b[0m"]);
+  tab.aiMode = true;
 }
 
-function hideSuggestion() {
-  clearAiLines();
-  aiMode = false;
-  pendingCommand = null;
+function hideSuggestion(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+  clearAiLines(tabId);
+  tab.aiMode = false;
+  aiRequestId++; // Invalidate any in-flight requests
+  tab.pendingCommand = null;
 }
 
-async function handleEnglishInput(text) {
-  showLoading();
+async function handleEnglishInput(tabId, text) {
+  // Verify tab exists before starting
+  if (!tabs.has(tabId)) return;
+
+  const currentRequestId = aiRequestId;
+  showLoading(tabId);
 
   try {
     let cwd = "~";
     try {
-      cwd = await invoke("get_shell_cwd", { tabId: activeTabId });
+      cwd = await invoke("get_shell_cwd", { tabId });
     } catch (_) {}
+
+    // Check if request was cancelled or tab changed
+    if (currentRequestId !== aiRequestId || !tabs.has(tabId) || activeTabId !== tabId) {
+      return;
+    }
 
     const history = recentCommands.slice(-5);
     const raw = await invoke("translate_command", { prompt: text, cwd, history });
+
+    // Check if request was cancelled or tab changed
+    if (currentRequestId !== aiRequestId || !tabs.has(tabId) || activeTabId !== tabId) {
+      return;
+    }
+
     const cleaned = raw.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
     const result = JSON.parse(cleaned);
-    showSuggestion(result.command, result.explanation, result.dangerous);
+    showSuggestion(tabId, result.command, result.explanation, result.dangerous);
   } catch (err) {
-    showSuggestion("Error: " + err, "Failed to translate", false);
+    // Check if request was cancelled or tab changed
+    if (currentRequestId !== aiRequestId || !tabs.has(tabId) || activeTabId !== tabId) {
+      return;
+    }
+    showSuggestion(tabId, "Error: " + err, "Failed to translate", false);
   }
 }
 
@@ -481,37 +504,59 @@ async function handleAgentInput(tabId, text) {
       history: tab.agentHistory,
     });
 
+    // Re-fetch tab after await to handle race conditions where tab/conversation
+    // may have been closed or exited agent mode during the async call
+    const currentTab = tabs.get(tabId);
+    if (!currentTab || !currentTab.agentConversationEl) {
+      return; // Tab closed or exited agent mode, bail out
+    }
+
     // Remove thinking indicator if still present
     if (thinkingEl && thinkingEl.parentNode) {
       thinkingEl.remove();
     }
 
     // If no streaming el was created (e.g. empty response), add the final message
-    if (!tab._agentStreamEl) {
+    if (!currentTab._agentStreamEl) {
       addAgentMessage(tabId, "assistant", result);
     } else {
       // Do final render with complete text
-      tab._agentStreamEl.innerHTML = renderMarkdown(result);
-      tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
+      currentTab._agentStreamEl.innerHTML = renderMarkdown(result);
+      if (currentTab.agentConversationEl) {
+        currentTab.agentConversationEl.scrollTop = currentTab.agentConversationEl.scrollHeight;
+      }
     }
 
     // Push to conversation history (cap at 20 messages)
-    tab.agentHistory.push({ role: "user", content: text });
-    tab.agentHistory.push({ role: "assistant", content: result });
-    while (tab.agentHistory.length > 20) {
-      tab.agentHistory.shift();
+    if (currentTab.agentHistory) {
+      currentTab.agentHistory.push({ role: "user", content: text });
+      currentTab.agentHistory.push({ role: "assistant", content: result });
+      while (currentTab.agentHistory.length > 20) {
+        currentTab.agentHistory.shift();
+      }
     }
   } catch (err) {
+    // Re-fetch tab after await to handle race conditions
+    const currentTab = tabs.get(tabId);
+
     if (thinkingEl && thinkingEl.parentNode) {
       thinkingEl.remove();
     }
-    addAgentMessage(tabId, "assistant", "Error: " + String(err));
+
+    // Only add error message if tab and conversation still exist
+    if (currentTab && currentTab.agentConversationEl) {
+      addAgentMessage(tabId, "assistant", "Error: " + String(err));
+    }
   } finally {
-    tab.agentStreaming = false;
-    tab._agentStreamBuffer = "";
-    tab._agentStreamEl = null;
-    tab.atPrompt = true;
-    showEditor(tabId);
+    // Re-fetch tab after await to handle race conditions
+    const currentTab = tabs.get(tabId);
+    if (currentTab) {
+      currentTab.agentStreaming = false;
+      currentTab._agentStreamBuffer = "";
+      currentTab._agentStreamEl = null;
+      currentTab.atPrompt = true;
+      showEditor(tabId);
+    }
   }
 }
 
@@ -602,6 +647,12 @@ function highlightLine(line) {
     } else {
       result += escapeHtml(word);
     }
+
+    // Handle # not caught by inline comment (e.g., a#b)
+    if (i < line.length && line[i] === "#") {
+      result += escapeHtml(line[i]);
+      i++;
+    }
   }
   return result;
 }
@@ -667,19 +718,19 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
   if (!tab) return;
 
   // AI mode intercept
-  if (aiMode) {
+  if (tab.aiMode) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (pendingCommand && !pendingCommand.startsWith("Error:")) {
-        const cmd = pendingCommand;
-        hideSuggestion();
+      if (tab.pendingCommand && !tab.pendingCommand.startsWith("Error:")) {
+        const cmd = tab.pendingCommand;
+        hideSuggestion(activeTabId);
         recentCommands.push(cmd);
         if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
         invoke("write_pty", { tabId: activeTabId, data: "\x15" + cmd + "\r" });
         tab.atPrompt = false;
         hideEditor(tabId);
       } else {
-        hideSuggestion();
+        hideSuggestion(activeTabId);
         invoke("write_pty", { tabId: activeTabId, data: "\x03" });
       }
       textarea.value = "";
@@ -689,7 +740,7 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
     }
     if (e.key === "Escape" || (e.key === "n" && !e.metaKey && !e.ctrlKey)) {
       e.preventDefault();
-      hideSuggestion();
+      hideSuggestion(activeTabId);
       invoke("write_pty", { tabId: activeTabId, data: "\x03" });
       textarea.value = "";
       updateHighlight(textarea, codeEl);
@@ -731,7 +782,7 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
 
     // 4. English input → single-command translate
     if (looksLikeEnglish(text)) {
-      handleEnglishInput(trimmed);
+      handleEnglishInput(tabId, trimmed);
       return;
     }
 
@@ -989,7 +1040,7 @@ function createTab() {
   tabsContainer.appendChild(tabEl);
 
   // Store in map
-  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentHistory: [], agentStreaming: false, agentConversationEl: null, lastCwd: "" });
+  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentHistory: [], agentStreaming: false, agentConversationEl: null, lastCwd: "", aiMode: false, pendingCommand: null, aiLineCount: 0 });
 
   // Switch to the new tab, then fit + push cursor to bottom + spawn shell
   switchTab(tabId);
@@ -1018,12 +1069,12 @@ function createTab() {
       const textarea = tabInfo.editorEl?.querySelector(".input-editor-textarea");
       if (textarea) {
         textarea.focus();
-        // Insert printable chars into textarea
-        if (data.length === 1 && data.charCodeAt(0) >= 32) {
+        // Insert printable chars into textarea (supports multi-character paste)
+        if (Array.from(data).every(c => c.charCodeAt(0) >= 32)) {
           const start = textarea.selectionStart;
           const end = textarea.selectionEnd;
           textarea.value = textarea.value.substring(0, start) + data + textarea.value.substring(end);
-          textarea.selectionStart = textarea.selectionEnd = start + 1;
+          textarea.selectionStart = textarea.selectionEnd = start + data.length;
           textarea.dispatchEvent(new Event("input"));
         }
       }
@@ -1321,8 +1372,9 @@ function showToast(msg, duration = 3000) {
 // ── Launcher bar ──
 document.querySelectorAll(".launcher-btn").forEach((btn) => {
   btn.addEventListener("click", async () => {
-    if (aiMode) hideSuggestion();
     if (!activeTabId) return;
+    const activeTab = tabs.get(activeTabId);
+    if (activeTab && activeTab.aiMode) hideSuggestion(activeTabId);
 
     const cmd = btn.getAttribute("data-cmd");
     if (!cmd) return;
