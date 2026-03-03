@@ -38,16 +38,18 @@ fn has_data_available(fd: i32) -> bool {
 }
 
 fn utf8_complete_len(buf: &[u8]) -> usize {
-    match std::str::from_utf8(buf) {
-        Ok(_) => buf.len(),
-        Err(e) => {
-            let valid = e.valid_up_to();
-            match e.error_len() {
-                None => valid, // incomplete sequence at tail — exclude it
-                Some(bad_len) => {
-                    // genuinely invalid bytes — include them, check rest
-                    let after_bad = valid + bad_len;
-                    after_bad + utf8_complete_len(&buf[after_bad..])
+    let mut offset = 0;
+    loop {
+        match std::str::from_utf8(&buf[offset..]) {
+            Ok(_) => return buf.len(),
+            Err(e) => {
+                let valid = e.valid_up_to();
+                match e.error_len() {
+                    None => return offset + valid, // incomplete sequence at tail — exclude it
+                    Some(bad_len) => {
+                        // genuinely invalid bytes — include them, continue checking
+                        offset += valid + bad_len;
+                    }
                 }
             }
         }
