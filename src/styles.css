@@ -326,9 +326,26 @@ html, body {
   flex: 1;
 }
 
-.agent-msg {
-  padding: 10px 16px;
+/* ── Terminal-style user input ── */
+.agent-user-input {
+  padding: 6px 16px 6px 28px;
+  margin: 4px 12px;
+  font-family: Menlo, 'SF Mono', 'JetBrains Mono', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #E0E0E0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  position: relative;
   animation: agent-fade-in 0.15s ease-out;
+}
+
+.agent-user-input::before {
+  content: "\276F";
+  position: absolute;
+  left: 12px;
+  color: #7AA2F7;
+  font-weight: bold;
 }
 
 @keyframes agent-fade-in {
@@ -336,90 +353,88 @@ html, body {
   to   { opacity: 1; transform: translateY(0); }
 }
 
-.agent-msg-user {
-  border-left: 2px solid #7AA2F7;
+/* ── Agent text response ── */
+.agent-text {
+  padding: 8px 16px;
   margin: 4px 12px;
-  border-radius: 4px;
-  background: rgba(122, 162, 247, 0.06);
-}
-
-.agent-msg-assistant {
-  margin: 4px 12px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.agent-msg-label {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 6px;
-}
-
-.agent-msg-user .agent-msg-label {
-  color: #7AA2F7;
-}
-
-.agent-msg-assistant .agent-msg-label {
-  color: #C084FC;
-}
-
-.agent-msg-content {
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
   font-size: 13px;
   line-height: 1.55;
   color: #D4D4D8;
   word-wrap: break-word;
   overflow-wrap: break-word;
+  animation: agent-fade-in 0.15s ease-out;
 }
 
-.agent-msg-user .agent-msg-content {
-  color: #E0E0E0;
-  font-family: Menlo, 'SF Mono', 'JetBrains Mono', monospace;
+/* ── Todo sticky panel ── */
+.agent-todo-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: 4px 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(250, 204, 21, 0.06);
+  border: 1px solid rgba(250, 204, 21, 0.2);
   font-size: 12px;
+  line-height: 1.5;
+  color: #D4D4D8;
+}
+
+.agent-todo-title {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #FACC15;
+  margin-bottom: 4px;
+}
+
+.agent-todo-content {
+  font-family: Menlo, 'SF Mono', 'JetBrains Mono', monospace;
+  font-size: 11px;
   white-space: pre-wrap;
 }
 
-/* Markdown elements inside assistant messages */
-.agent-msg-content h1,
-.agent-msg-content h2,
-.agent-msg-content h3 {
+/* Markdown elements inside agent text */
+.agent-text h1,
+.agent-text h2,
+.agent-text h3 {
   color: #E0E0E0;
   margin: 12px 0 6px 0;
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
 }
 
-.agent-msg-content h1 { font-size: 16px; font-weight: 700; }
-.agent-msg-content h2 { font-size: 14px; font-weight: 600; }
-.agent-msg-content h3 { font-size: 13px; font-weight: 600; }
+.agent-text h1 { font-size: 16px; font-weight: 700; }
+.agent-text h2 { font-size: 14px; font-weight: 600; }
+.agent-text h3 { font-size: 13px; font-weight: 600; }
 
-.agent-msg-content p {
+.agent-text p {
   margin: 6px 0;
 }
 
-.agent-msg-content ul,
-.agent-msg-content ol {
+.agent-text ul,
+.agent-text ol {
   margin: 6px 0;
   padding-left: 20px;
 }
 
-.agent-msg-content li {
+.agent-text li {
   margin: 3px 0;
 }
 
-.agent-msg-content strong {
+.agent-text strong {
   color: #E0E0E0;
   font-weight: 600;
 }
 
-.agent-msg-content em {
+.agent-text em {
   color: #A0A0B0;
   font-style: italic;
 }
 
-.agent-msg-content code {
+.agent-text code {
   font-family: Menlo, 'SF Mono', 'JetBrains Mono', monospace;
   font-size: 12px;
   background: rgba(255, 255, 255, 0.08);
@@ -428,7 +443,7 @@ html, body {
   color: #E0E0E0;
 }
 
-.agent-msg-content pre {
+.agent-text pre {
   margin: 8px 0;
   border-radius: 6px;
   background: #0A0A0A;
@@ -437,7 +452,7 @@ html, body {
   position: relative;
 }
 
-.agent-msg-content pre code {
+.agent-text pre code {
   display: block;
   padding: 10px 12px;
   background: none;
@@ -515,10 +530,9 @@ html, body {
 
 /* ── Tool execution blocks ── */
 .agent-tool-block {
-  margin: 6px 12px;
-  border-radius: 6px;
-  background: rgba(34, 211, 238, 0.04);
-  border: 1px solid rgba(34, 211, 238, 0.15);
+  margin: 4px 12px;
+  border-left: 2px solid rgba(34, 211, 238, 0.4);
+  padding-left: 10px;
   overflow: hidden;
   animation: agent-fade-in 0.15s ease-out;
 }
@@ -526,11 +540,9 @@ html, body {
 .agent-tool-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  background: rgba(34, 211, 238, 0.06);
-  border-bottom: 1px solid rgba(34, 211, 238, 0.1);
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+  gap: 6px;
+  padding: 3px 0;
+  font-family: Menlo, 'SF Mono', 'JetBrains Mono', monospace;
   font-size: 11px;
 }
 

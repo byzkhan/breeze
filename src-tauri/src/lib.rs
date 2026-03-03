@@ -1,5 +1,5 @@
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,34 @@ struct PtySession {
 
 struct PtyState {
     sessions: Mutex<HashMap<String, PtySession>>,
+}
+
+struct AgentState {
+    messages: Vec<serde_json::Value>,
+    todo: String,
+    recent_commands: VecDeque<String>,
+    recent_edits: VecDeque<String>,
+    cwd: String,
+    iteration: u32,
+    running: bool,
+}
+
+impl AgentState {
+    fn new(cwd: String) -> Self {
+        Self {
+            messages: Vec::new(),
+            todo: String::new(),
+            recent_commands: VecDeque::with_capacity(6),
+            recent_edits: VecDeque::with_capacity(6),
+            cwd,
+            iteration: 0,
+            running: false,
+        }
+    }
+}
+
+struct AgentStates {
+    states: Mutex<HashMap<String, AgentState>>,
 }
 
 /// Returns true if `fd` has data ready to read (zero-timeout poll).
@@ -357,80 +385,557 @@ async fn translate_command(prompt: String, cwd: String, history: Vec<String>) ->
         .ok_or_else(|| "Unexpected API response format".to_string())
 }
 
-/// Run a shell command as a subprocess and capture output.
-async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Result<String, String> {
-    // Get CWD from the tab's shell process
-    let cwd = {
-        // Extract child_pid while holding the lock briefly
-        let child_pid = {
-            let state = app.state::<PtyState>();
-            let sessions = state.sessions.lock().unwrap();
-            sessions.get(tab_id).and_then(|s| s.child_pid)
-        }; // Lock released here
+/// Resolve the CWD from the tab's shell process via lsof.
+async fn resolve_cwd(app: &AppHandle, tab_id: &str) -> String {
+    let child_pid = {
+        let state = app.state::<PtyState>();
+        let sessions = state.sessions.lock().unwrap();
+        sessions.get(tab_id).and_then(|s| s.child_pid)
+    };
 
-        // Run lsof command outside the lock scope
-        let mut found_cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        if let Some(pid) = child_pid {
-            if let Ok(output) = tokio::process::Command::new("lsof")
-                .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
-                .output()
-                .await
-            {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    if let Some(path) = line.strip_prefix('n') {
-                        found_cwd = path.to_string();
-                        break;
-                    }
+    let mut found_cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    if let Some(pid) = child_pid {
+        if let Ok(output) = tokio::process::Command::new("lsof")
+            .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
+            .output()
+            .await
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Some(path) = line.strip_prefix('n') {
+                    found_cwd = path.to_string();
+                    break;
                 }
             }
         }
-        found_cwd
-    };
+    }
+    found_cwd
+}
 
+/// Resolve a path against the agent CWD (handles relative + absolute).
+fn resolve_path(cwd: &str, path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::path::Path::new(cwd).join(p)
+    }
+}
+
+/// Truncate output to a character limit.
+fn truncate_output(output: &mut String, max_chars: usize) {
+    let char_count = output.chars().count();
+    if char_count > max_chars {
+        let truncate_at = output.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(output.len());
+        output.truncate(truncate_at);
+        output.push_str(&format!("\n... (output truncated, showed {max_chars} of {char_count} chars)"));
+    }
+}
+
+/// Execute a bash command with configurable timeout.
+async fn execute_bash(app: &AppHandle, tab_id: &str, cwd: &str, command: &str, timeout_secs: u64) -> (String, bool) {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let timeout = timeout_secs.min(300).max(1);
+
+    let _ = app.emit("agent-tool-start", json!({
+        "tab_id": tab_id,
+        "tool": "bash",
+        "detail": command,
+    }));
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(timeout),
         tokio::process::Command::new(&shell)
             .arg("-c")
             .arg(command)
-            .current_dir(&cwd)
+            .current_dir(cwd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output(),
     )
-    .await
-    .map_err(|_| "Command timed out after 10 seconds (use & for long-running processes)".to_string())?
-    .map_err(|e| e.to_string())?;
+    .await;
 
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    let stderr = String::from_utf8_lossy(&result.stderr);
-
-    let mut output = String::new();
-    if !stdout.is_empty() {
-        output.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !output.is_empty() {
-            output.push('\n');
+    let (mut output, success) = match result {
+        Err(_) => (format!("Command timed out after {timeout}s (use & for long-running processes)"), false),
+        Ok(Err(e)) => (format!("Failed to execute: {e}"), false),
+        Ok(Ok(res)) => {
+            let stdout = String::from_utf8_lossy(&res.stdout);
+            let stderr = String::from_utf8_lossy(&res.stderr);
+            let exit_code = res.status.code().unwrap_or(-1);
+            let mut out = String::new();
+            if !stdout.is_empty() {
+                out.push_str(&stdout);
+            }
+            if !stderr.is_empty() {
+                if !out.is_empty() { out.push('\n'); }
+                out.push_str("[stderr]\n");
+                out.push_str(&stderr);
+            }
+            if out.is_empty() {
+                out.push_str("(no output)");
+            }
+            out.push_str(&format!("\n[exit code: {exit_code}]"));
+            (out, exit_code == 0)
         }
-        output.push_str(&stderr);
-    }
-    if output.is_empty() {
-        output.push_str("(no output)");
+    };
+
+    truncate_output(&mut output, 16000);
+
+    let _ = app.emit("agent-tool-end", json!({
+        "tab_id": tab_id,
+        "tool": "bash",
+        "detail": command,
+        "output": output,
+        "success": success,
+    }));
+
+    (output, success)
+}
+
+/// Read a file with line numbers, optional offset/limit.
+fn execute_read_file(cwd: &str, path: &str, offset: Option<u32>, limit: Option<u32>) -> (String, bool) {
+    let resolved = resolve_path(cwd, path);
+    let content = match std::fs::read_to_string(&resolved) {
+        Ok(c) => c,
+        Err(e) => return (format!("Error reading {}: {e}", resolved.display()), false),
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let start = offset.unwrap_or(0) as usize;
+    let count = limit.unwrap_or(500) as usize;
+    let end = (start + count).min(total);
+
+    if start >= total {
+        return (format!("{} has {total} lines, offset {start} is past end", resolved.display()), false);
     }
 
-    // Truncate very long output
-    const MAX_CHARS: usize = 8000;
-    let char_count = output.chars().count();
-    if char_count > MAX_CHARS {
-        let truncate_at = output.char_indices().nth(MAX_CHARS).map(|(i, _)| i).unwrap_or(output.len());
-        output.truncate(truncate_at);
-        output.push_str("\n... (output truncated)");
+    let mut output = format!("# {path} ({total} lines)\n");
+    for (i, line) in lines[start..end].iter().enumerate() {
+        output.push_str(&format!("{:>4} | {}\n", start + i + 1, line));
+    }
+    if end < total {
+        output.push_str(&format!("... ({} more lines, use offset={end} to continue)\n", total - end));
     }
 
-    Ok(output)
+    (output, true)
+}
+
+/// Create or overwrite a file.
+fn execute_write_file(cwd: &str, path: &str, content: &str) -> (String, bool) {
+    let resolved = resolve_path(cwd, path);
+
+    // Auto-create parent dirs
+    if let Some(parent) = resolved.parent() {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return (format!("Error creating directory {}: {e}", parent.display()), false);
+            }
+        }
+    }
+
+    match std::fs::write(&resolved, content) {
+        Ok(_) => {
+            let line_count = content.lines().count();
+            (format!("Wrote {} ({line_count} lines)", resolved.display()), true)
+        }
+        Err(e) => (format!("Error writing {}: {e}", resolved.display()), false),
+    }
+}
+
+/// Find-and-replace edit with uniqueness check.
+fn execute_edit_file(cwd: &str, path: &str, old_string: &str, new_string: &str) -> (String, bool) {
+    let resolved = resolve_path(cwd, path);
+    let content = match std::fs::read_to_string(&resolved) {
+        Ok(c) => c,
+        Err(e) => return (format!("Error reading {}: {e}", resolved.display()), false),
+    };
+
+    let count = content.matches(old_string).count();
+    if count == 0 {
+        return (format!("Error: old_string not found in {}. Use read_file to see current content.", resolved.display()), false);
+    }
+    if count > 1 {
+        return (format!("Error: old_string appears {count} times in {}. Include more surrounding context to make it unique.", resolved.display()), false);
+    }
+
+    let new_content = content.replacen(old_string, new_string, 1);
+    match std::fs::write(&resolved, &new_content) {
+        Ok(_) => (format!("Applied edit to {}", resolved.display()), true),
+        Err(e) => (format!("Error writing {}: {e}", resolved.display()), false),
+    }
+}
+
+/// Dispatch tool execution.
+async fn execute_tool(app: &AppHandle, tab_id: &str, tool_name: &str, input: &serde_json::Value) -> (String, bool) {
+    // Get CWD from agent state
+    let cwd = {
+        let state = app.state::<AgentStates>();
+        let states = state.states.lock().unwrap();
+        states.get(tab_id).map(|s| s.cwd.clone()).unwrap_or_else(|| "/".to_string())
+    };
+
+    match tool_name {
+        "bash" => {
+            let command = input["command"].as_str().unwrap_or("").to_string();
+            if command.trim().is_empty() {
+                return ("Error: command cannot be empty".to_string(), false);
+            }
+            let timeout = input["timeout"].as_u64().unwrap_or(120);
+            execute_bash(app, tab_id, &cwd, &command, timeout).await
+        }
+        "read_file" => {
+            let path = input["path"].as_str().unwrap_or("");
+            if path.is_empty() {
+                return ("Error: path is required".to_string(), false);
+            }
+            let offset = input["offset"].as_u64().map(|v| v as u32);
+            let limit = input["limit"].as_u64().map(|v| v as u32);
+
+            let _ = app.emit("agent-tool-start", json!({
+                "tab_id": tab_id, "tool": "read_file", "detail": path,
+            }));
+            let (output, success) = execute_read_file(&cwd, path, offset, limit);
+            let _ = app.emit("agent-tool-end", json!({
+                "tab_id": tab_id, "tool": "read_file", "detail": path,
+                "output": if output.len() > 500 { format!("{}... ({} chars)", &output[..500], output.len()) } else { output.clone() },
+                "success": success,
+            }));
+            (output, success)
+        }
+        "write_file" => {
+            let path = input["path"].as_str().unwrap_or("");
+            if path.is_empty() {
+                return ("Error: path is required".to_string(), false);
+            }
+            let content = input["content"].as_str().unwrap_or("");
+
+            let _ = app.emit("agent-tool-start", json!({
+                "tab_id": tab_id, "tool": "write_file", "detail": path,
+            }));
+            let (output, success) = execute_write_file(&cwd, path, content);
+            let _ = app.emit("agent-tool-end", json!({
+                "tab_id": tab_id, "tool": "write_file", "detail": path,
+                "output": output, "success": success,
+            }));
+            (output, success)
+        }
+        "edit_file" => {
+            let path = input["path"].as_str().unwrap_or("");
+            if path.is_empty() {
+                return ("Error: path is required".to_string(), false);
+            }
+            let old_string = input["old_string"].as_str().unwrap_or("");
+            let new_string = input["new_string"].as_str().unwrap_or("");
+            if old_string.is_empty() {
+                return ("Error: old_string is required".to_string(), false);
+            }
+
+            let _ = app.emit("agent-tool-start", json!({
+                "tab_id": tab_id, "tool": "edit_file", "detail": path,
+            }));
+            let (output, success) = execute_edit_file(&cwd, path, old_string, new_string);
+            let _ = app.emit("agent-tool-end", json!({
+                "tab_id": tab_id, "tool": "edit_file", "detail": path,
+                "output": output, "success": success,
+            }));
+            (output, success)
+        }
+        "todo" => {
+            let plan = input["plan"].as_str().unwrap_or("").to_string();
+            // Update todo in agent state
+            {
+                let agent_states = app.state::<AgentStates>();
+                let mut states = agent_states.states.lock().unwrap();
+                if let Some(agent_state) = states.get_mut(tab_id) {
+                    agent_state.todo = plan.clone();
+                }
+            }
+            let _ = app.emit("agent-todo", json!({
+                "tab_id": tab_id, "plan": plan,
+            }));
+            ("Plan updated.".to_string(), true)
+        }
+        _ => (format!("Error: unknown tool '{tool_name}'"), false),
+    }
+}
+
+/// Compress older tool_result observations to save context.
+/// Keeps last 5 tool results at full detail, compresses older ones.
+fn compress_observations(messages: &mut Vec<serde_json::Value>) {
+    // Count tool_result blocks from newest to oldest
+    let mut tool_result_indices: Vec<(usize, usize)> = vec![]; // (msg_idx, block_idx)
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        if let Some(content) = msg["content"].as_array() {
+            for (block_idx, block) in content.iter().enumerate() {
+                if block["type"].as_str() == Some("tool_result") {
+                    tool_result_indices.push((msg_idx, block_idx));
+                }
+            }
+        }
+    }
+
+    if tool_result_indices.len() <= 5 {
+        return;
+    }
+
+    // Compress all but the last 5
+    let to_compress = tool_result_indices.len() - 5;
+    for &(msg_idx, block_idx) in &tool_result_indices[..to_compress] {
+        if let Some(content_arr) = messages[msg_idx]["content"].as_array_mut() {
+            if let Some(block) = content_arr.get_mut(block_idx) {
+                if let Some(text) = block["content"].as_str() {
+                    let lines: Vec<&str> = text.lines().collect();
+                    if lines.len() > 40 {
+                        let mut compressed = String::new();
+                        for line in &lines[..20] {
+                            compressed.push_str(line);
+                            compressed.push('\n');
+                        }
+                        compressed.push_str(&format!("... ({} lines omitted)\n", lines.len() - 40));
+                        for line in &lines[lines.len()-20..] {
+                            compressed.push_str(line);
+                            compressed.push('\n');
+                        }
+                        block["content"] = serde_json::Value::String(compressed);
+                    }
+                }
+            }
+        }
+    }
+
+    // Also remove stale system reminder text blocks from older user messages (keep last 3)
+    let mut reminder_positions: Vec<(usize, usize)> = vec![];
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        if msg["role"].as_str() != Some("user") { continue; }
+        if let Some(content) = msg["content"].as_array() {
+            for (block_idx, block) in content.iter().enumerate() {
+                if block["type"].as_str() == Some("text") {
+                    if let Some(t) = block["text"].as_str() {
+                        if t.starts_with("[Reminder:") {
+                            reminder_positions.push((msg_idx, block_idx));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if reminder_positions.len() > 3 {
+        let to_remove = reminder_positions.len() - 3;
+        // Remove from highest index first to avoid shifting
+        for &(msg_idx, block_idx) in reminder_positions[..to_remove].iter().rev() {
+            if let Some(content_arr) = messages[msg_idx]["content"].as_array_mut() {
+                if content_arr.len() > 1 {
+                    content_arr.remove(block_idx);
+                }
+            }
+        }
+    }
+}
+
+/// Build a system reminder to inject after tool results.
+fn build_system_reminder(todo: &str, iterations_remaining: u32) -> String {
+    let mut reminder = String::from("[Reminder: Read files before editing. Use edit_file for modifications.");
+
+    if iterations_remaining <= 5 {
+        reminder.push_str(&format!(" | WARNING: Only {} iterations remaining. Wrap up.", iterations_remaining));
+    } else {
+        reminder.push_str(&format!(" | {} iterations remaining.", iterations_remaining));
+    }
+
+    if !todo.is_empty() {
+        reminder.push_str(&format!(" | Current plan: {}", todo));
+    }
+
+    reminder.push(']');
+    reminder
+}
+
+/// Detect repeated commands/edits and return a warning if looping.
+fn detect_loop(recent_commands: &VecDeque<String>, recent_edits: &VecDeque<String>, tool_type: &str, identifier: &str) -> Option<String> {
+    match tool_type {
+        "bash" => {
+            let count = recent_commands.iter().filter(|c| *c == identifier).count();
+            if count >= 3 {
+                Some("Warning: You've run this exact command 3+ times. Try a different approach.".to_string())
+            } else {
+                None
+            }
+        }
+        "edit_file" => {
+            let count = recent_edits.iter().filter(|f| *f == identifier).count();
+            if count >= 3 {
+                Some("Warning: You've edited this file 3+ times. Read the full file first and reconsider your approach.".to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+const AGENT_SYSTEM_PROMPT: &str = r#"You are Breeze, a terminal-embedded coding agent with direct access to the user's filesystem and shell.
+
+## Tools (5 primitives)
+- bash: shell commands (git, build, test, search via grep/find/rg). Commands time out after 120s. Use & for servers.
+- read_file: read with line numbers. Use offset/limit for >500 lines. ALWAYS read before editing.
+- write_file: create new files or full rewrites. Auto-creates parent dirs.
+- edit_file: find-replace (old_string must appear exactly once, include enough context). More efficient than rewriting.
+- todo: track your plan in checklist format. Use for multi-step tasks.
+
+## Workflow: Understand → Plan → Implement → Verify
+1. Read files, check project structure with bash
+2. For complex tasks (3+ steps), use todo to write a checklist
+3. Make changes with edit_file (preferred) or write_file (new files)
+4. Run tests, linters, build commands to verify
+
+## Rules
+- ALWAYS read a file before editing it
+- If something fails, diagnose root cause — don't blindly retry
+- Be concise. Let actions speak.
+- Don't ask permission — just do the work
+- Don't delete files without user requesting it
+- Do NOT run interactive commands (vim, nano, less, top). Use non-interactive alternatives."#;
+
+fn build_tools() -> serde_json::Value {
+    json!([
+        {
+            "name": "bash",
+            "description": "Run a shell command. Use for git, build, test, search (grep/find/rg), install, and any terminal action.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The shell command to execute" },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds (default 120, max 300)" }
+                },
+                "required": ["command"]
+            }
+        },
+        {
+            "name": "read_file",
+            "description": "Read a file with line numbers. ALWAYS read before editing. Use offset/limit for large files.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path (relative to CWD or absolute)" },
+                    "offset": { "type": "integer", "description": "Starting line (0-indexed, default 0)" },
+                    "limit": { "type": "integer", "description": "Max lines to read (default 500)" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "write_file",
+            "description": "Create a new file or completely overwrite an existing one. Auto-creates parent directories.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path (relative to CWD or absolute)" },
+                    "content": { "type": "string", "description": "Full file content to write" }
+                },
+                "required": ["path", "content"]
+            }
+        },
+        {
+            "name": "edit_file",
+            "description": "Find and replace text in a file. old_string must appear exactly once — include enough context lines to be unique.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path (relative to CWD or absolute)" },
+                    "old_string": { "type": "string", "description": "Exact text to find (must appear exactly once)" },
+                    "new_string": { "type": "string", "description": "Replacement text" }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }
+        },
+        {
+            "name": "todo",
+            "description": "Track your plan as a checklist. Use this for multi-step tasks to organize your work.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "plan": { "type": "string", "description": "Your plan in checklist format (e.g. '- [x] Step 1\\n- [ ] Step 2')" }
+                },
+                "required": ["plan"]
+            }
+        }
+    ])
+}
+
+/// Parse SSE stream and extract text, tool_calls, and stop_reason.
+async fn process_stream(
+    app: &AppHandle,
+    tab_id: &str,
+    response: reqwest::Response,
+) -> Result<(String, Vec<(String, String, String)>, String), String> {
+    let mut stream = response.bytes_stream();
+    let mut sse_buf = String::new();
+    let mut current_text = String::new();
+    let mut current_block_type = String::new();
+    let mut current_tool_id = String::new();
+    let mut current_tool_name = String::new();
+    let mut current_tool_json = String::new();
+    let mut tool_calls: Vec<(String, String, String)> = vec![];
+    let mut stop_reason = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        sse_buf.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(line_end) = sse_buf.find('\n') {
+            let line = sse_buf[..line_end].trim_end_matches('\r').to_string();
+            sse_buf = sse_buf[line_end + 1..].to_string();
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" { continue; }
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    let event_type = event["type"].as_str().unwrap_or("");
+                    match event_type {
+                        "content_block_start" => {
+                            let block_type = event["content_block"]["type"].as_str().unwrap_or("");
+                            current_block_type = block_type.to_string();
+                            if block_type == "tool_use" {
+                                current_tool_id = event["content_block"]["id"].as_str().unwrap_or("").to_string();
+                                current_tool_name = event["content_block"]["name"].as_str().unwrap_or("").to_string();
+                                current_tool_json = String::new();
+                            }
+                        }
+                        "content_block_delta" => {
+                            if current_block_type == "text" {
+                                if let Some(text) = event["delta"]["text"].as_str() {
+                                    current_text.push_str(text);
+                                    let _ = app.emit("agent-chunk", json!({"tab_id": tab_id, "text": text}));
+                                }
+                            } else if current_block_type == "tool_use" {
+                                if let Some(json_chunk) = event["delta"]["partial_json"].as_str() {
+                                    current_tool_json.push_str(json_chunk);
+                                }
+                            }
+                        }
+                        "content_block_stop" => {
+                            if current_block_type == "tool_use" {
+                                tool_calls.push((current_tool_id.clone(), current_tool_name.clone(), current_tool_json.clone()));
+                            }
+                            current_block_type = String::new();
+                        }
+                        "message_delta" => {
+                            if let Some(sr) = event["delta"]["stop_reason"].as_str() {
+                                stop_reason = sr.to_string();
+                            }
+                        }
+                        "error" => {
+                            let err_msg = event["error"]["message"].as_str().unwrap_or("Unknown stream error");
+                            return Err(err_msg.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((current_text, tool_calls, stop_reason))
 }
 
 #[tauri::command]
@@ -438,261 +943,224 @@ async fn agent_chat(
     app: AppHandle,
     tab_id: String,
     message: String,
-    history: Vec<serde_json::Value>,
 ) -> Result<String, String> {
     let api_key = get_api_key()?;
+    let max_iterations: u32 = 50;
 
-    let system_prompt = "You are an agentic terminal assistant embedded in a terminal emulator called Breeze. \
-        You have a run_command tool to execute shell commands directly in the user's terminal.\n\n\
-        Key behaviors:\n\
-        - When the user asks you to do something, DO it using run_command — don't just explain how.\n\
-        - Run commands proactively to gather information, fix problems, and complete tasks.\n\
-        - After running a command, analyze the output and take next steps automatically.\n\
-        - If a command fails, diagnose the issue and try to fix it.\n\
-        - Be concise in your text responses — let the commands do the talking.\n\
-        - Only ask the user for clarification when you truly cannot proceed without their input.\n\
-        - Use markdown formatting for text responses (headings, code blocks, lists).\n\
-        - Show your reasoning: before running a command, briefly explain WHAT you're doing and WHY.\n\
-        - When writing/creating files, show the key content in a markdown code block before or after.\n\n\
-        IMPORTANT — command execution constraints:\n\
-        - Commands time out after 10 seconds. For servers and long-running processes, ALWAYS use & or nohup to run in background (e.g. `python3 -m http.server 8000 &`).\n\
-        - After starting a background server, use `sleep 1 && curl ...` to verify it's running.\n\
-        - Do NOT run interactive commands (vim, nano, less, top). Use non-interactive alternatives.";
-
-    let tools = json!([{
-        "name": "run_command",
-        "description": "Run a shell command in the user's terminal and see the output. Use this whenever you need to check something, run a script, install packages, create files, or perform any terminal action. The command runs in the user's current working directory.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to execute"
-                }
-            },
-            "required": ["command"]
+    // Initialize or retrieve agent state
+    let cwd = resolve_cwd(&app, &tab_id).await;
+    {
+        let agent_states = app.state::<AgentStates>();
+        let mut states = agent_states.states.lock().unwrap();
+        let state = states.entry(tab_id.clone()).or_insert_with(|| AgentState::new(cwd.clone()));
+        if state.running {
+            return Err("Agent is already running for this tab".to_string());
         }
-    }]);
+        state.running = true;
+        state.cwd = cwd.clone();
+        state.iteration = 0;
+        state.messages.push(json!({"role": "user", "content": message}));
+    }
 
-    let mut messages = history.clone();
-    messages.push(json!({"role": "user", "content": message}));
+    let system_prompt = format!("{}\n\nCurrent directory: {}", AGENT_SYSTEM_PROMPT, cwd);
+    let tools = build_tools();
+
+    let client = reqwest::Client::builder()
+        .read_timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| { mark_not_running(&app, &tab_id); e.to_string() })?;
 
     let mut full_text = String::new();
-    let client = reqwest::Client::builder()
-        .read_timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let mut iteration: u32 = 0;
+    let mut finished = false;
 
-    // Agentic loop — up to 15 tool-use iterations
-    let mut exhausted_iterations = true;
-    for _iteration in 0..15 {
+    loop {
+        if iteration >= max_iterations {
+            let warn = format!("\n\nReached maximum iteration limit ({max_iterations} turns). The task may be incomplete.");
+            full_text.push_str(&warn);
+            let _ = app.emit("agent-chunk", json!({"tab_id": tab_id, "text": warn}));
+            break;
+        }
+
+        iteration += 1;
+
+        // Emit thinking event
+        let _ = app.emit("agent-thinking", json!({"tab_id": tab_id, "iteration": iteration, "total": max_iterations}));
+
+        // Compress observations before API call
+        let messages_snapshot = {
+            let agent_states = app.state::<AgentStates>();
+            let mut states = agent_states.states.lock().unwrap();
+            if let Some(state) = states.get_mut(&tab_id) {
+                state.iteration = iteration;
+                compress_observations(&mut state.messages);
+                state.messages.clone()
+            } else {
+                break;
+            }
+        };
+
         let res = client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&json!({
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 4096,
+                "model": "claude-opus-4-6",
+                "max_tokens": 16384,
                 "stream": true,
                 "system": system_prompt,
                 "tools": tools,
-                "messages": messages
+                "messages": messages_snapshot
             }))
             .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
+
+        let res = match res {
+            Ok(r) => r,
+            Err(e) => {
+                mark_not_running(&app, &tab_id);
+                return Err(e.to_string());
+            }
+        };
 
         if !res.status().is_success() {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();
+            mark_not_running(&app, &tab_id);
             return Err(format!("API error {}: {}", status, body));
         }
 
-        let mut stream = res.bytes_stream();
-        let mut sse_buf = String::new();
-
-        // Track content blocks for this turn
-        let mut current_text = String::new();
-        let mut current_block_type = String::new();
-        let mut current_tool_id = String::new();
-        let mut current_tool_name = String::new();
-        let mut current_tool_json = String::new();
-        let mut tool_calls: Vec<(String, String, String)> = vec![]; // (id, name, input_json)
-        let mut stop_reason = String::new();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| e.to_string())?;
-            sse_buf.push_str(&String::from_utf8_lossy(&chunk));
-
-            while let Some(line_end) = sse_buf.find('\n') {
-                let line = sse_buf[..line_end].trim_end_matches('\r').to_string();
-                sse_buf = sse_buf[line_end + 1..].to_string();
-
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        continue;
-                    }
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        let event_type = event["type"].as_str().unwrap_or("");
-
-                        match event_type {
-                            "content_block_start" => {
-                                let block_type =
-                                    event["content_block"]["type"].as_str().unwrap_or("");
-                                current_block_type = block_type.to_string();
-                                if block_type == "tool_use" {
-                                    current_tool_id = event["content_block"]["id"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string();
-                                    current_tool_name = event["content_block"]["name"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string();
-                                    current_tool_json = String::new();
-                                }
-                            }
-                            "content_block_delta" => {
-                                if current_block_type == "text" {
-                                    if let Some(text) = event["delta"]["text"].as_str() {
-                                        current_text.push_str(text);
-                                        full_text.push_str(text);
-                                        let _ = app.emit(
-                                            "agent-chunk",
-                                            json!({"tab_id": tab_id, "text": text}),
-                                        );
-                                    }
-                                } else if current_block_type == "tool_use" {
-                                    if let Some(json_chunk) =
-                                        event["delta"]["partial_json"].as_str()
-                                    {
-                                        current_tool_json.push_str(json_chunk);
-                                    }
-                                }
-                            }
-                            "content_block_stop" => {
-                                if current_block_type == "tool_use" {
-                                    tool_calls.push((
-                                        current_tool_id.clone(),
-                                        current_tool_name.clone(),
-                                        current_tool_json.clone(),
-                                    ));
-                                }
-                                current_block_type = String::new();
-                            }
-                            "message_delta" => {
-                                if let Some(sr) = event["delta"]["stop_reason"].as_str() {
-                                    stop_reason = sr.to_string();
-                                }
-                            }
-                            "error" => {
-                                let err_msg = event["error"]["message"]
-                                    .as_str()
-                                    .unwrap_or("Unknown stream error");
-                                return Err(err_msg.to_string());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+        let (current_text, tool_calls, stop_reason) = match process_stream(&app, &tab_id, res).await {
+            Ok(result) => result,
+            Err(e) => {
+                mark_not_running(&app, &tab_id);
+                return Err(e);
             }
-        }
+        };
 
-        // Build the assistant message content blocks
+        full_text.push_str(&current_text);
+
+        // Build assistant content blocks and push to state
         let mut assistant_content: Vec<serde_json::Value> = vec![];
         if !current_text.is_empty() {
             assistant_content.push(json!({"type": "text", "text": current_text}));
         }
         for (id, name, input_json) in &tool_calls {
-            let input: serde_json::Value =
-                serde_json::from_str(input_json).unwrap_or(json!({}));
+            let input: serde_json::Value = serde_json::from_str(input_json).unwrap_or(json!({}));
             assistant_content.push(json!({
-                "type": "tool_use",
-                "id": id,
-                "name": name,
-                "input": input
+                "type": "tool_use", "id": id, "name": name, "input": input
             }));
         }
-        if assistant_content.is_empty() {
-            exhausted_iterations = false;
-            break;
-        }
-        messages.push(json!({"role": "assistant", "content": assistant_content}));
 
-        // If stop_reason is tool_use, execute tools and loop
-        if stop_reason == "tool_use" {
-            if tool_calls.is_empty() {
-                exhausted_iterations = false;
-                break;
+        if assistant_content.is_empty() {
+            finished = true;
+        }
+
+        {
+            let agent_states = app.state::<AgentStates>();
+            let mut states = agent_states.states.lock().unwrap();
+            if let Some(state) = states.get_mut(&tab_id) {
+                if !assistant_content.is_empty() {
+                    state.messages.push(json!({"role": "assistant", "content": assistant_content}));
+                }
             }
+        }
+
+        if finished { break; }
+
+        // Handle tool calls
+        if stop_reason == "tool_use" && !tool_calls.is_empty() {
             let mut tool_results: Vec<serde_json::Value> = vec![];
 
             for (id, name, input_json) in &tool_calls {
-                if name == "run_command" {
-                    let input: serde_json::Value =
-                        serde_json::from_str(input_json).unwrap_or(json!({}));
-                    let command = input["command"].as_str().unwrap_or("").to_string();
+                let input: serde_json::Value = serde_json::from_str(input_json).unwrap_or(json!({}));
 
-                    // Validate that command is not empty or whitespace-only
-                    if command.trim().is_empty() {
-                        tool_results.push(json!({
-                            "type": "tool_result",
-                            "tool_use_id": id,
-                            "content": "Error: command cannot be empty"
-                        }));
-                        continue;
+                let (mut output, success) = execute_tool(&app, &tab_id, name, &input).await;
+
+                // Loop detection + tracking
+                {
+                    let agent_states = app.state::<AgentStates>();
+                    let mut states = agent_states.states.lock().unwrap();
+                    if let Some(state) = states.get_mut(&tab_id) {
+                        if name == "bash" {
+                            let cmd = input["command"].as_str().unwrap_or("").to_string();
+                            if let Some(warning) = detect_loop(&state.recent_commands, &state.recent_edits, "bash", &cmd) {
+                                output.push('\n');
+                                output.push_str(&warning);
+                            }
+                            state.recent_commands.push_back(cmd);
+                            if state.recent_commands.len() > 5 { state.recent_commands.pop_front(); }
+                        } else if name == "edit_file" {
+                            let path = input["path"].as_str().unwrap_or("").to_string();
+                            if let Some(warning) = detect_loop(&state.recent_commands, &state.recent_edits, "edit_file", &path) {
+                                output.push('\n');
+                                output.push_str(&warning);
+                            }
+                            state.recent_edits.push_back(path);
+                            if state.recent_edits.len() > 5 { state.recent_edits.pop_front(); }
+                        }
                     }
+                }
 
-                    // Emit event: command is about to run
-                    let _ = app.emit(
-                        "agent-tool-call",
-                        json!({"tab_id": tab_id, "command": command}),
-                    );
+                tool_results.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": id,
+                    "content": output,
+                    "is_error": !success
+                }));
+            }
 
-                    // Execute the command
-                    let output = run_shell_command(&app, &tab_id, &command).await;
-                    let result_text = match &output {
-                        Ok(s) => s.clone(),
-                        Err(e) => format!("Error: {}", e),
-                    };
+            // Build system reminder
+            let reminder = {
+                let agent_states = app.state::<AgentStates>();
+                let states = agent_states.states.lock().unwrap();
+                let todo = states.get(&tab_id).map(|s| s.todo.as_str()).unwrap_or("");
+                let remaining = max_iterations.saturating_sub(iteration);
+                build_system_reminder(todo, remaining)
+            };
 
-                    // Emit event: command finished with output
-                    let _ = app.emit(
-                        "agent-tool-result",
-                        json!({"tab_id": tab_id, "command": command, "output": result_text}),
-                    );
+            // Inject reminder as text block alongside tool results
+            tool_results.push(json!({
+                "type": "text",
+                "text": reminder
+            }));
 
-                    tool_results.push(json!({
-                        "type": "tool_result",
-                        "tool_use_id": id,
-                        "content": result_text
-                    }));
-                } else {
-                    // Unknown tool - return error result
-                    tool_results.push(json!({
-                        "type": "tool_result",
-                        "tool_use_id": id,
-                        "content": format!("Error: unknown tool '{}'", name)
-                    }));
+            // Push tool results to agent state
+            {
+                let agent_states = app.state::<AgentStates>();
+                let mut states = agent_states.states.lock().unwrap();
+                if let Some(state) = states.get_mut(&tab_id) {
+                    state.messages.push(json!({"role": "user", "content": tool_results}));
                 }
             }
 
-            messages.push(json!({"role": "user", "content": tool_results}));
-            continue; // Loop back to call API again
+            continue;
         }
 
-        // stop_reason is "end_turn" — we're done
-        exhausted_iterations = false;
+        // end_turn or no tool calls — done
         break;
     }
 
-    // Check if the loop exhausted all iterations without reaching end_turn
-    if exhausted_iterations {
-        full_text.push_str("\n\n⚠️ Agent reached maximum iteration limit (15 turns). The task may be incomplete.");
-    }
-
+    mark_not_running(&app, &tab_id);
     Ok(full_text)
+}
+
+/// Helper to mark agent as not running.
+fn mark_not_running(app: &AppHandle, tab_id: &str) {
+    let agent_states = app.state::<AgentStates>();
+    let mut states = agent_states.states.lock().unwrap();
+    if let Some(state) = states.get_mut(tab_id) {
+        state.running = false;
+    }
+}
+
+#[tauri::command]
+fn reset_agent(app: AppHandle, tab_id: String) -> Result<(), String> {
+    let state = app.state::<AgentStates>();
+    let mut states = state.states.lock().unwrap();
+    states.remove(&tab_id);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -703,7 +1171,10 @@ pub fn run() {
         .manage(PtyState {
             sessions: Mutex::new(HashMap::new()),
         })
-        .invoke_handler(tauri::generate_handler![spawn_shell, write_pty, resize_pty, close_tab, pause_pty, resume_pty, get_shell_cwd, translate_command, agent_chat, get_git_branch, get_node_version, check_command_exists])
+        .manage(AgentStates {
+            states: Mutex::new(HashMap::new()),
+        })
+        .invoke_handler(tauri::generate_handler![spawn_shell, write_pty, resize_pty, close_tab, pause_pty, resume_pty, get_shell_cwd, translate_command, agent_chat, reset_agent, get_git_branch, get_node_version, check_command_exists])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

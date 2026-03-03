@@ -382,34 +382,27 @@ function createAgentConversation(tabId) {
   return el;
 }
 
-function addAgentMessage(tabId, role, content) {
+function addUserInput(tabId, text) {
   const tab = tabs.get(tabId);
   if (!tab || !tab.agentConversationEl) return null;
 
-  const msg = document.createElement("div");
-  msg.className = `agent-msg agent-msg-${role}`;
-
-  const label = document.createElement("div");
-  label.className = "agent-msg-label";
-  label.textContent = role === "user" ? "You" : "Agent";
-
-  const body = document.createElement("div");
-  body.className = "agent-msg-content";
-
-  if (role === "user") {
-    body.textContent = content;
-  } else {
-    body.innerHTML = renderMarkdown(content);
-  }
-
-  msg.appendChild(label);
-  msg.appendChild(body);
-  tab.agentConversationEl.appendChild(msg);
-
-  // Scroll to bottom
+  const el = document.createElement("div");
+  el.className = "agent-user-input";
+  el.textContent = text;
+  tab.agentConversationEl.appendChild(el);
   tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
+  return el;
+}
 
-  return body;
+function addAgentText(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab || !tab.agentConversationEl) return null;
+
+  const el = document.createElement("div");
+  el.className = "agent-text";
+  tab.agentConversationEl.appendChild(el);
+  tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
+  return el;
 }
 
 function addThinkingIndicator(tabId) {
@@ -460,13 +453,22 @@ function exitAgentMode(tabId) {
   const tab = tabs.get(tabId);
   if (!tab) return;
 
-  tab.agentHistory = [];
+  tab.agentActive = false;
   tab.agentStreaming = false;
+
+  // Clear backend state
+  invoke("reset_agent", { tabId }).catch(() => {});
 
   // Remove the conversation element entirely so next /agent starts fresh
   if (tab.agentConversationEl) {
     tab.agentConversationEl.remove();
     tab.agentConversationEl = null;
+  }
+
+  // Remove todo panel
+  if (tab.agentTodoEl) {
+    tab.agentTodoEl.remove();
+    tab.agentTodoEl = null;
   }
 
   hideAgentView(tabId);
@@ -480,14 +482,13 @@ async function handleAgentInput(tabId, text) {
 
   if (tab.agentStreaming) return; // Prevent concurrent agent calls
 
+  tab.agentActive = true;
+
   // Show the conversation view
   showAgentView(tabId);
 
-  // Add user message
-  addAgentMessage(tabId, "user", text);
-
-  // Show thinking indicator
-  const thinkingEl = addThinkingIndicator(tabId);
+  // Add user input (terminal-style)
+  addUserInput(tabId, text);
 
   hideEditor(tabId);
   tab.agentStreaming = true;
@@ -498,57 +499,37 @@ async function handleAgentInput(tabId, text) {
     const result = await invoke("agent_chat", {
       tabId,
       message: text,
-      history: tab.agentHistory,
     });
 
-    // Re-fetch tab after await to handle race conditions where tab/conversation
-    // may have been closed or exited agent mode during the async call
     const currentTab = tabs.get(tabId);
     if (!currentTab || !currentTab.agentConversationEl) {
-      return; // Tab closed or exited agent mode, bail out
+      return;
     }
 
-    // Remove thinking indicator if still present
-    if (thinkingEl && thinkingEl.parentNode) {
-      thinkingEl.remove();
-    }
-    // Also remove any leftover thinking indicators from tool iterations
-    tab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
+    // Remove leftover thinking indicators
+    currentTab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
 
-    // If no streaming el was created (e.g. empty response), add the final message
+    // Finalize streaming
     if (!currentTab._agentStreamEl) {
-      addAgentMessage(tabId, "assistant", result);
+      const el = addAgentText(tabId);
+      if (el) el.innerHTML = renderMarkdown(result);
     } else if (currentTab._agentStreamBuffer) {
-      // Finalize the last streaming block — don't re-render with full accumulated result
-      // because streaming already rendered each segment incrementally
       currentTab._agentStreamEl.innerHTML = renderMarkdown(currentTab._agentStreamBuffer);
       if (currentTab.agentConversationEl) {
         currentTab.agentConversationEl.scrollTop = currentTab.agentConversationEl.scrollHeight;
       }
     }
-
-    // Push to conversation history (cap at 20 messages)
-    if (currentTab.agentHistory) {
-      currentTab.agentHistory.push({ role: "user", content: text });
-      currentTab.agentHistory.push({ role: "assistant", content: result });
-      while (currentTab.agentHistory.length > 20) {
-        currentTab.agentHistory.shift();
-      }
-    }
   } catch (err) {
-    // Re-fetch tab after await to handle race conditions
     const currentTab = tabs.get(tabId);
 
-    if (thinkingEl && thinkingEl.parentNode) {
-      thinkingEl.remove();
-    }
-
-    // Only add error message if tab and conversation still exist
     if (currentTab && currentTab.agentConversationEl) {
-      addAgentMessage(tabId, "assistant", "Error: " + String(err));
+      const el = addAgentText(tabId);
+      if (el) {
+        el.style.color = "#F87171";
+        el.textContent = "Error: " + String(err);
+      }
     }
   } finally {
-    // Re-fetch tab after await to handle race conditions
     const currentTab = tabs.get(tabId);
     if (currentTab && currentTab.agentStreaming) {
       currentTab.agentStreaming = false;
@@ -775,7 +756,7 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
     }
 
     // 3. Active agent conversation (follow-up without /agent prefix)
-    if (tab.agentHistory.length > 0 && !trimmed.startsWith("/")) {
+    if (tab.agentActive && !trimmed.startsWith("/")) {
       if (trimmed) handleAgentInput(tabId, trimmed);
       return;
     }
@@ -786,8 +767,11 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
       return;
     }
 
-    // 5. Regular shell command — also reset agent history
-    tab.agentHistory = [];
+    // 5. Regular shell command — also reset agent state
+    if (tab.agentActive) {
+      tab.agentActive = false;
+      invoke("reset_agent", { tabId }).catch(() => {});
+    }
     submitCommand(tabId, text);
     return;
   }
@@ -914,7 +898,7 @@ function showEditor(tabId) {
   // Update prompt indicator based on agent mode
   const promptEl = tab.editorEl.querySelector(".input-editor-prompt");
   if (promptEl) {
-    if (tab.agentHistory.length > 0) {
+    if (tab.agentActive) {
       promptEl.textContent = "✦";
       promptEl.style.color = "#FACC15"; // yellow
     } else {
@@ -1044,7 +1028,7 @@ function createTab() {
   tabsContainer.appendChild(tabEl);
 
   // Store in map
-  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentHistory: [], agentStreaming: false, agentConversationEl: null, lastCwd: "", aiMode: false, pendingCommand: null, aiLineCount: 0 });
+  tabs.set(tabId, { term, fitAddon, container: pane, xtermEl, editorEl, tabEl, atPrompt: true, historyIndex: -1, editorDraft: "", agentActive: false, agentStreaming: false, agentConversationEl: null, agentTodoEl: null, lastCwd: "", aiMode: false, pendingCommand: null, aiLineCount: 0 });
 
   // Switch to the new tab, then fit + push cursor to bottom + spawn shell
   switchTab(tabId);
@@ -1118,7 +1102,7 @@ function switchTab(tabId) {
   const tab = tabs.get(tabId);
 
   // Toggle agent conversation view visibility
-  if (tab.agentHistory.length > 0 && tab.agentConversationEl) {
+  if (tab.agentActive && tab.agentConversationEl) {
     showAgentView(tabId);
   } else {
     hideAgentView(tabId);
@@ -1195,17 +1179,15 @@ listen("agent-chunk", (event) => {
   const tab = tabs.get(tab_id);
   if (!tab || !tab.agentStreaming) return;
 
-  // Remove ALL thinking indicators on first chunk of a new text segment
+  // Remove thinking indicators on first chunk
   if (!tab._agentStreamEl) {
     tab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
 
-    // Create assistant message block for streaming
-    const contentEl = addAgentMessage(tab_id, "assistant", "");
-    tab._agentStreamEl = contentEl;
+    const el = addAgentText(tab_id);
+    tab._agentStreamEl = el;
     tab._agentStreamBuffer = "";
   }
 
-  // Accumulate text and re-render markdown
   tab._agentStreamBuffer += text;
   if (tab._agentStreamEl) {
     tab._agentStreamEl.innerHTML = renderMarkdown(tab._agentStreamBuffer);
@@ -1213,47 +1195,61 @@ listen("agent-chunk", (event) => {
   }
 });
 
-listen("agent-tool-call", (event) => {
-  const { tab_id, command } = event.payload;
+function formatToolStart(toolName, detail) {
+  const icons = { bash: "$", read_file: "\u{1F4C4}", write_file: "\u{1F4DD}", edit_file: "\u{270F}\u{FE0F}", todo: "\u{1F4CB}" };
+  const labels = { bash: "Running", read_file: "Reading", write_file: "Writing", edit_file: "Editing", todo: "Updating plan" };
+  const icon = icons[toolName] || ">";
+  let label = labels[toolName] || toolName;
+  if ((toolName === "read_file" || toolName === "write_file" || toolName === "edit_file") && detail) {
+    label += ` ${detail}`;
+  }
+  return { icon, label, detail: toolName === "bash" ? detail : "" };
+}
+
+listen("agent-tool-start", (event) => {
+  const { tab_id, tool, detail } = event.payload;
   const tab = tabs.get(tab_id);
   if (!tab || !tab.agentConversationEl) return;
 
-  // Finalize current streaming text block (if any) so tool block appears after it
+  // Finalize current streaming text block
   if (tab._agentStreamEl) {
     tab._agentStreamEl.innerHTML = renderMarkdown(tab._agentStreamBuffer);
     tab._agentStreamEl = null;
     tab._agentStreamBuffer = "";
   }
 
-  // Remove thinking indicator
-  const thinking = tab.agentConversationEl.querySelector(".agent-thinking");
-  if (thinking) thinking.remove();
+  // Remove thinking indicators
+  tab.agentConversationEl.querySelectorAll(".agent-thinking").forEach(el => el.remove());
 
-  // Create tool execution block
+  const { icon, label, detail: cmdDetail } = formatToolStart(tool, detail);
+
   const block = document.createElement("div");
   block.className = "agent-tool-block";
-  block.dataset.command = command;
+  block.dataset.tool = tool;
 
   const header = document.createElement("div");
   header.className = "agent-tool-header";
-  header.innerHTML = `<span class="agent-tool-icon running">⟳</span><span class="agent-tool-label">Running command</span>`;
-
-  const cmdEl = document.createElement("div");
-  cmdEl.className = "agent-tool-command";
-  cmdEl.textContent = command;
+  header.innerHTML = `<span class="agent-tool-icon running">${icon}</span><span class="agent-tool-label">${label}</span>`;
 
   block.appendChild(header);
-  block.appendChild(cmdEl);
+
+  if (cmdDetail) {
+    const cmdEl = document.createElement("div");
+    cmdEl.className = "agent-tool-command";
+    cmdEl.textContent = cmdDetail;
+    block.appendChild(cmdEl);
+  }
+
   tab.agentConversationEl.appendChild(block);
   tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
 });
 
-listen("agent-tool-result", (event) => {
-  const { tab_id, command, output } = event.payload;
+listen("agent-tool-end", (event) => {
+  const { tab_id, tool, output, success } = event.payload;
   const tab = tabs.get(tab_id);
   if (!tab || !tab.agentConversationEl) return;
 
-  // Find the matching tool block (last one with running spinner)
+  // Find the matching tool block (last one with running icon)
   const blocks = tab.agentConversationEl.querySelectorAll(".agent-tool-block");
   let targetBlock = null;
   for (let i = blocks.length - 1; i >= 0; i--) {
@@ -1265,15 +1261,14 @@ listen("agent-tool-result", (event) => {
 
   if (!targetBlock) return;
 
-  // Update header — stop spinner
   const icon = targetBlock.querySelector(".agent-tool-icon");
   if (icon) {
-    icon.textContent = "✓";
+    icon.textContent = success ? "\u2713" : "\u2717";
     icon.classList.remove("running");
-    icon.style.color = "#4ADE80";
+    icon.style.color = success ? "#4ADE80" : "#F87171";
   }
   const label = targetBlock.querySelector(".agent-tool-label");
-  if (label) label.textContent = "Completed";
+  if (label) label.textContent = success ? "Done" : "Failed";
 
   // Add output (collapsed if long)
   const lines = output.split("\n");
@@ -1292,7 +1287,7 @@ listen("agent-tool-result", (event) => {
   if (isLong) {
     const toggle = document.createElement("div");
     toggle.className = "agent-tool-toggle";
-    toggle.innerHTML = `▶ Show output (${lines.length} lines)`;
+    toggle.innerHTML = `\u25B6 Show output (${lines.length} lines)`;
     let expanded = false;
     toggle.addEventListener("click", () => {
       expanded = !expanded;
@@ -1300,21 +1295,54 @@ listen("agent-tool-result", (event) => {
         outputEl.style.maxHeight = "200px";
         outputEl.style.padding = "8px 12px";
         outputEl.style.borderTop = "1px solid rgba(255, 255, 255, 0.06)";
-        toggle.innerHTML = `▼ Hide output`;
+        toggle.innerHTML = `\u25BC Hide output`;
       } else {
         outputEl.style.maxHeight = "0";
         outputEl.style.padding = "0 12px";
         outputEl.style.borderTop = "none";
-        toggle.innerHTML = `▶ Show output (${lines.length} lines)`;
+        toggle.innerHTML = `\u25B6 Show output (${lines.length} lines)`;
       }
     });
     targetBlock.appendChild(toggle);
   }
 
-  // Show thinking indicator — AI is processing tool output for next step
-  addThinkingIndicator(tab_id);
-
   tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
+});
+
+listen("agent-thinking", (event) => {
+  const { tab_id, iteration, total } = event.payload;
+  const tab = tabs.get(tab_id);
+  if (!tab || !tab.agentConversationEl) return;
+
+  // Remove existing thinking indicators
+  tab.agentConversationEl.querySelectorAll(".agent-thinking").forEach(el => el.remove());
+
+  const el = document.createElement("div");
+  el.className = "agent-thinking";
+  el.innerHTML = `<div class="agent-thinking-dot"><span></span><span></span><span></span></div>Thinking (step ${iteration})`;
+  tab.agentConversationEl.appendChild(el);
+  tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
+});
+
+listen("agent-todo", (event) => {
+  const { tab_id, plan } = event.payload;
+  const tab = tabs.get(tab_id);
+  if (!tab || !tab.agentConversationEl) return;
+
+  if (!tab.agentTodoEl) {
+    const todoEl = document.createElement("div");
+    todoEl.className = "agent-todo-sticky";
+    // Insert after banner
+    const banner = tab.agentConversationEl.querySelector(".agent-banner");
+    if (banner && banner.nextSibling) {
+      tab.agentConversationEl.insertBefore(todoEl, banner.nextSibling);
+    } else {
+      tab.agentConversationEl.prepend(todoEl);
+    }
+    tab.agentTodoEl = todoEl;
+  }
+
+  tab.agentTodoEl.innerHTML = `<div class="agent-todo-title">Plan</div><div class="agent-todo-content">${renderMarkdown(plan)}</div>`;
 });
 
 // ── Context bar ──
@@ -1443,9 +1471,8 @@ document.addEventListener("keydown", async (e) => {
       e.preventDefault();
       tab.agentStreaming = false;
 
-      // Remove thinking indicator
-      const thinking = tab.agentConversationEl?.querySelector(".agent-thinking");
-      if (thinking) thinking.remove();
+      // Remove thinking indicators
+      tab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
 
       // If streaming was in progress, finalize the partial message
       if (tab._agentStreamEl && tab._agentStreamBuffer) {
