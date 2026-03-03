@@ -645,6 +645,12 @@ function highlightLine(line) {
     } else {
       result += escapeHtml(word);
     }
+
+    // Handle # not caught by inline comment (e.g., a#b)
+    if (i < line.length && line[i] === "#") {
+      result += escapeHtml(line[i]);
+      i++;
+    }
   }
   return result;
 }
