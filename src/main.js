@@ -512,13 +512,16 @@ async function handleAgentInput(tabId, text) {
     if (thinkingEl && thinkingEl.parentNode) {
       thinkingEl.remove();
     }
+    // Also remove any leftover thinking indicators from tool iterations
+    tab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
 
     // If no streaming el was created (e.g. empty response), add the final message
     if (!currentTab._agentStreamEl) {
       addAgentMessage(tabId, "assistant", result);
-    } else {
-      // Do final render with complete text
-      currentTab._agentStreamEl.innerHTML = renderMarkdown(result);
+    } else if (currentTab._agentStreamBuffer) {
+      // Finalize the last streaming block — don't re-render with full accumulated result
+      // because streaming already rendered each segment incrementally
+      currentTab._agentStreamEl.innerHTML = renderMarkdown(currentTab._agentStreamBuffer);
       if (currentTab.agentConversationEl) {
         currentTab.agentConversationEl.scrollTop = currentTab.agentConversationEl.scrollHeight;
       }
@@ -1192,14 +1195,14 @@ listen("agent-chunk", (event) => {
   const tab = tabs.get(tab_id);
   if (!tab || !tab.agentStreaming) return;
 
-  // Remove thinking indicator on first chunk
+  // Remove ALL thinking indicators on first chunk of a new text segment
   if (!tab._agentStreamEl) {
-    const thinking = tab.agentConversationEl?.querySelector(".agent-thinking");
-    if (thinking) thinking.remove();
+    tab.agentConversationEl?.querySelectorAll(".agent-thinking").forEach(el => el.remove());
 
     // Create assistant message block for streaming
     const contentEl = addAgentMessage(tab_id, "assistant", "");
     tab._agentStreamEl = contentEl;
+    tab._agentStreamBuffer = "";
   }
 
   // Accumulate text and re-render markdown
@@ -1250,11 +1253,11 @@ listen("agent-tool-result", (event) => {
   const tab = tabs.get(tab_id);
   if (!tab || !tab.agentConversationEl) return;
 
-  // Find the matching tool block (last one with this command)
+  // Find the matching tool block (last one with running spinner)
   const blocks = tab.agentConversationEl.querySelectorAll(".agent-tool-block");
   let targetBlock = null;
   for (let i = blocks.length - 1; i >= 0; i--) {
-    if (blocks[i].dataset.command === command) {
+    if (blocks[i].querySelector(".agent-tool-icon.running")) {
       targetBlock = blocks[i];
       break;
     }
@@ -1274,7 +1277,7 @@ listen("agent-tool-result", (event) => {
 
   // Add output (collapsed if long)
   const lines = output.split("\n");
-  const isLong = lines.length > 8;
+  const isLong = lines.length > 5;
 
   const outputEl = document.createElement("div");
   outputEl.className = "agent-tool-output";
@@ -1307,6 +1310,9 @@ listen("agent-tool-result", (event) => {
     });
     targetBlock.appendChild(toggle);
   }
+
+  // Show thinking indicator — AI is processing tool output for next step
+  addThinkingIndicator(tab_id);
 
   tab.agentConversationEl.scrollTop = tab.agentConversationEl.scrollHeight;
 });

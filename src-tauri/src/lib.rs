@@ -391,7 +391,7 @@ async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Resu
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(10),
         tokio::process::Command::new(&shell)
             .arg("-c")
             .arg(command)
@@ -401,7 +401,7 @@ async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Resu
             .output(),
     )
     .await
-    .map_err(|_| "Command timed out after 30 seconds".to_string())?
+    .map_err(|_| "Command timed out after 10 seconds (use & for long-running processes)".to_string())?
     .map_err(|e| e.to_string())?;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
@@ -451,7 +451,13 @@ async fn agent_chat(
         - If a command fails, diagnose the issue and try to fix it.\n\
         - Be concise in your text responses — let the commands do the talking.\n\
         - Only ask the user for clarification when you truly cannot proceed without their input.\n\
-        - Use markdown formatting for text responses (headings, code blocks, lists).";
+        - Use markdown formatting for text responses (headings, code blocks, lists).\n\
+        - Show your reasoning: before running a command, briefly explain WHAT you're doing and WHY.\n\
+        - When writing/creating files, show the key content in a markdown code block before or after.\n\n\
+        IMPORTANT — command execution constraints:\n\
+        - Commands time out after 10 seconds. For servers and long-running processes, ALWAYS use & or nohup to run in background (e.g. `python3 -m http.server 8000 &`).\n\
+        - After starting a background server, use `sleep 1 && curl ...` to verify it's running.\n\
+        - Do NOT run interactive commands (vim, nano, less, top). Use non-interactive alternatives.";
 
     let tools = json!([{
         "name": "run_command",
