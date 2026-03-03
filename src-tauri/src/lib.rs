@@ -366,9 +366,10 @@ async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Resu
         // Run lsof command outside the lock scope
         let mut found_cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         if let Some(pid) = child_pid {
-            if let Ok(output) = std::process::Command::new("lsof")
+            if let Ok(output) = tokio::process::Command::new("lsof")
                 .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
                 .output()
+                .await
             {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
