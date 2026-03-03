@@ -152,9 +152,6 @@ function looksLikeEnglish(input) {
   if (/[|><;&$`\\]/.test(first)) return false;
 
   if (KNOWN_COMMANDS.has(first)) {
-    const rest = words.slice(1).map(w => w.toLowerCase());
-    if (rest.some(w => ENGLISH_INDICATORS.has(w))) return true;
-    if (words.length >= 5 && !trimmed.includes("-")) return true;
     return false;
   }
 
