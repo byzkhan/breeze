@@ -947,6 +947,7 @@ function hideEditor(tabId) {
 
   // Re-fit xterm since available height changed
   requestAnimationFrame(() => {
+    if (!tabs.has(tabId)) return;
     tab.fitAddon.fit();
   });
 }
