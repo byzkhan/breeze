@@ -287,6 +287,7 @@ fn resume_pty(app: AppHandle, tab_id: String) -> Result<(), String> {
 fn get_api_key() -> Result<String, String> {
     // 1. Compile-time embedded key
     if let Some(key) = option_env!("BREEZE_API_KEY") {
+        let key = key.trim();
         if !key.is_empty() {
             return Ok(key.to_string());
         }
@@ -321,7 +322,7 @@ async fn translate_command(prompt: String, cwd: String, history: Vec<String>) ->
     }
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
     let res = client
@@ -366,9 +367,10 @@ async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Resu
         // Run lsof command outside the lock scope
         let mut found_cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         if let Some(pid) = child_pid {
-            if let Ok(output) = std::process::Command::new("lsof")
+            if let Ok(output) = tokio::process::Command::new("lsof")
                 .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
                 .output()
+                .await
             {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
@@ -467,7 +469,7 @@ async fn agent_chat(
 
     let mut full_text = String::new();
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
 
