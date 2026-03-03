@@ -270,13 +270,19 @@ function renderMarkdown(text) {
   }
 
   function inlineFormat(line) {
-    // Inline code
-    line = line.replace(/`([^`]+)`/g, '<code>$1</code>');
-    // Bold
-    line = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    // Italic
-    line = line.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
-    return line;
+    // Split on inline code spans to avoid formatting inside backticks
+    const parts = line.split(/(`[^`]+`)/g);
+    for (let j = 0; j < parts.length; j++) {
+      if (parts[j].startsWith("`") && parts[j].endsWith("`")) {
+        // Code span — wrap and skip formatting
+        parts[j] = "<code>" + parts[j].slice(1, -1) + "</code>";
+      } else {
+        // Apply bold then italic only outside code spans
+        parts[j] = parts[j].replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        parts[j] = parts[j].replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+      }
+    }
+    return parts.join("");
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -491,7 +497,9 @@ async function handleAgentInput(tabId, text) {
   addUserInput(tabId, text);
 
   hideEditor(tabId);
+  const sessionToken = Symbol("agentSession");
   tab.agentStreaming = true;
+  tab._agentSessionToken = sessionToken;
   tab._agentStreamBuffer = "";
   tab._agentStreamEl = null;
 
@@ -503,6 +511,11 @@ async function handleAgentInput(tabId, text) {
 
     const currentTab = tabs.get(tabId);
     if (!currentTab || !currentTab.agentConversationEl) {
+      return;
+    }
+
+    // If streaming was cancelled (Escape) or session changed, don't add final message
+    if (!currentTab.agentStreaming || currentTab._agentSessionToken !== sessionToken) {
       return;
     }
 
@@ -531,7 +544,8 @@ async function handleAgentInput(tabId, text) {
     }
   } finally {
     const currentTab = tabs.get(tabId);
-    if (currentTab && currentTab.agentStreaming) {
+    // Only reset if this is still the same session (prevents race with new sessions)
+    if (currentTab && currentTab._agentSessionToken === sessionToken && currentTab.agentStreaming) {
       currentTab.agentStreaming = false;
       currentTab._agentStreamBuffer = "";
       currentTab._agentStreamEl = null;
@@ -763,6 +777,7 @@ function handleEditorKeydown(e, tabId, textarea, codeEl) {
 
     // 4. English input → single-command translate
     if (looksLikeEnglish(text)) {
+      tab.historyIndex = -1;
       handleEnglishInput(tabId, trimmed);
       return;
     }
@@ -921,7 +936,7 @@ function showEditor(tabId) {
     if (!tabs.has(tabId)) return;
     const tab = tabs.get(tabId);
     tab.fitAddon.fit();
-    if (textarea && tabId === activeTabId) textarea.focus();
+    if (textarea && tabId === activeTabId && !tab.agentStreaming) textarea.focus();
   });
 }
 
@@ -1353,10 +1368,13 @@ const ctxNode = document.getElementById("ctx-node");
 const ctxNodeText = document.getElementById("ctx-node-text");
 
 function friendlyCwd(path) {
-  const home = "/Users/" + path.split("/")[2];
+  const segments = path.split("/");
   let friendly = path;
-  if (path.startsWith(home)) {
-    friendly = "~" + path.slice(home.length);
+  if (segments.length >= 3 && segments[2]) {
+    const home = "/Users/" + segments[2];
+    if (path.startsWith(home)) {
+      friendly = "~" + path.slice(home.length);
+    }
   }
   const parts = friendly.split("/").filter(Boolean);
   if (parts.length <= 2) return parts.join(" \u2192 ");
@@ -1365,11 +1383,14 @@ function friendlyCwd(path) {
 
 async function updateContextBar() {
   if (!activeTabId) return;
-  const tab = tabs.get(activeTabId);
+  const capturedTabId = activeTabId;
+  const tab = tabs.get(capturedTabId);
   if (!tab) return;
   try {
-    const cwd = await invoke("get_shell_cwd", { tabId: activeTabId });
-    const currentTab = tabs.get(activeTabId);
+    const cwd = await invoke("get_shell_cwd", { tabId: capturedTabId });
+    // Re-check that this tab is still the active one after the await
+    if (activeTabId !== capturedTabId) return;
+    const currentTab = tabs.get(capturedTabId);
     if (!currentTab || cwd === currentTab.lastCwd) return;
     currentTab.lastCwd = cwd;
 

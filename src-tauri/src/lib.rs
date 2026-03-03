@@ -66,16 +66,18 @@ fn has_data_available(fd: i32) -> bool {
 }
 
 fn utf8_complete_len(buf: &[u8]) -> usize {
-    match std::str::from_utf8(buf) {
-        Ok(_) => buf.len(),
-        Err(e) => {
-            let valid = e.valid_up_to();
-            match e.error_len() {
-                None => valid, // incomplete sequence at tail — exclude it
-                Some(bad_len) => {
-                    // genuinely invalid bytes — include them, check rest
-                    let after_bad = valid + bad_len;
-                    after_bad + utf8_complete_len(&buf[after_bad..])
+    let mut offset = 0;
+    loop {
+        match std::str::from_utf8(&buf[offset..]) {
+            Ok(_) => return buf.len(),
+            Err(e) => {
+                let valid = e.valid_up_to();
+                match e.error_len() {
+                    None => return offset + valid, // incomplete sequence at tail — exclude it
+                    Some(bad_len) => {
+                        // genuinely invalid bytes — include them, continue checking
+                        offset += valid + bad_len;
+                    }
                 }
             }
         }
@@ -285,11 +287,19 @@ fn get_node_version() -> Result<String, String> {
 
 #[tauri::command]
 fn check_command_exists(command: String) -> bool {
-    std::process::Command::new("which")
+    #[cfg(unix)]
+    let result = std::process::Command::new("which")
         .arg(&command)
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    #[cfg(windows)]
+    let result = std::process::Command::new("where")
+        .arg(&command)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    result
 }
 
 #[tauri::command]
@@ -933,6 +943,27 @@ async fn process_stream(
                 }
             }
         }
+    }
+
+    // Post-loop finalization: parse any trailing data left in the SSE buffer
+    if !sse_buf.is_empty() {
+        let line = sse_buf.trim_end_matches('\r').trim_end_matches('\n');
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data != "[DONE]" {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    if event["type"].as_str() == Some("message_delta") {
+                        if let Some(sr) = event["delta"]["stop_reason"].as_str() {
+                            stop_reason = sr.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // If an in-progress tool_use block was never closed, capture it
+    if current_block_type == "tool_use" && !current_tool_id.is_empty() {
+        tool_calls.push((current_tool_id, current_tool_name, current_tool_json));
     }
 
     Ok((current_text, tool_calls, stop_reason))
