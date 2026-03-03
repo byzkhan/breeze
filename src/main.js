@@ -1069,12 +1069,12 @@ function createTab() {
       const textarea = tabInfo.editorEl?.querySelector(".input-editor-textarea");
       if (textarea) {
         textarea.focus();
-        // Insert printable chars into textarea
-        if (data.length === 1 && data.charCodeAt(0) >= 32) {
+        // Insert printable chars into textarea (supports multi-character paste)
+        if (Array.from(data).every(c => c.charCodeAt(0) >= 32)) {
           const start = textarea.selectionStart;
           const end = textarea.selectionEnd;
           textarea.value = textarea.value.substring(0, start) + data + textarea.value.substring(end);
-          textarea.selectionStart = textarea.selectionEnd = start + 1;
+          textarea.selectionStart = textarea.selectionEnd = start + data.length;
           textarea.dispatchEvent(new Event("input"));
         }
       }
