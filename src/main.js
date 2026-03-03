@@ -540,7 +540,8 @@ async function handleAgentInput(tabId, text) {
   } catch (err) {
     const currentTab = tabs.get(tabId);
 
-    if (currentTab && currentTab.agentConversationEl) {
+    // Only show error if this session is still active (prevents stale errors from old sessions)
+    if (currentTab && currentTab.agentConversationEl && currentTab._agentSessionToken === sessionToken) {
       const el = addAgentText(tabId);
       if (el) {
         el.style.color = "#F87171";

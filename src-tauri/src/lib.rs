@@ -439,23 +439,39 @@ async fn resolve_cwd(app: &AppHandle, tab_id: &str) -> String {
 }
 
 /// Resolve a path against the agent CWD (handles relative + absolute).
-/// Prevents path traversal outside CWD for relative paths.
-fn resolve_path(cwd: &str, path: &str) -> std::path::PathBuf {
+/// For relative paths, normalizes .. components and verifies the result stays within CWD.
+fn resolve_path(cwd: &str, path: &str) -> Result<std::path::PathBuf, String> {
     let p = std::path::Path::new(path);
     if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        let joined = std::path::Path::new(cwd).join(p);
-        // Normalize by resolving .. components to prevent traversal
-        let mut normalized = std::path::PathBuf::new();
-        for component in joined.components() {
+        return Ok(p.to_path_buf());
+    }
+
+    let joined = std::path::Path::new(cwd).join(p);
+    // Normalize by resolving .. components
+    let mut normalized = std::path::PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); }
+            c => normalized.push(c.as_os_str()),
+        }
+    }
+
+    // Verify the resolved path is still within CWD
+    let cwd_normalized = {
+        let mut n = std::path::PathBuf::new();
+        for component in std::path::Path::new(cwd).components() {
             match component {
-                std::path::Component::ParentDir => { normalized.pop(); }
-                c => normalized.push(c.as_os_str()),
+                std::path::Component::ParentDir => { n.pop(); }
+                c => n.push(c.as_os_str()),
             }
         }
-        normalized
+        n
+    };
+    if !normalized.starts_with(&cwd_normalized) {
+        return Err(format!("Path '{}' resolves outside working directory", path));
     }
+
+    Ok(normalized)
 }
 
 /// Truncate output to a character limit.
@@ -548,7 +564,10 @@ async fn execute_bash(app: &AppHandle, tab_id: &str, cwd: &str, command: &str, t
 
 /// Read a file with line numbers, optional offset/limit.
 fn execute_read_file(cwd: &str, path: &str, offset: Option<u32>, limit: Option<u32>) -> (String, bool) {
-    let resolved = resolve_path(cwd, path);
+    let resolved = match resolve_path(cwd, path) {
+        Ok(p) => p,
+        Err(e) => return (e, false),
+    };
     let content = match std::fs::read_to_string(&resolved) {
         Ok(c) => c,
         Err(e) => return (format!("Error reading {}: {e}", resolved.display()), false),
@@ -577,7 +596,10 @@ fn execute_read_file(cwd: &str, path: &str, offset: Option<u32>, limit: Option<u
 
 /// Create or overwrite a file.
 fn execute_write_file(cwd: &str, path: &str, content: &str) -> (String, bool) {
-    let resolved = resolve_path(cwd, path);
+    let resolved = match resolve_path(cwd, path) {
+        Ok(p) => p,
+        Err(e) => return (e, false),
+    };
 
     // Auto-create parent dirs
     if let Some(parent) = resolved.parent() {
@@ -599,7 +621,10 @@ fn execute_write_file(cwd: &str, path: &str, content: &str) -> (String, bool) {
 
 /// Find-and-replace edit with uniqueness check.
 fn execute_edit_file(cwd: &str, path: &str, old_string: &str, new_string: &str) -> (String, bool) {
-    let resolved = resolve_path(cwd, path);
+    let resolved = match resolve_path(cwd, path) {
+        Ok(p) => p,
+        Err(e) => return (e, false),
+    };
     let content = match std::fs::read_to_string(&resolved) {
         Ok(c) => c,
         Err(e) => return (format!("Error reading {}: {e}", resolved.display()), false),
@@ -643,8 +668,16 @@ async fn execute_tool(app: &AppHandle, tab_id: &str, tool_name: &str, input: &se
             if path.is_empty() {
                 return ("Error: path is required".to_string(), false);
             }
-            let offset = input["offset"].as_u64().map(|v| v as u32);
-            let limit = input["limit"].as_u64().map(|v| v as u32);
+            let offset = match input["offset"].as_u64() {
+                Some(v) if v > u32::MAX as u64 => return ("Error: offset value too large".to_string(), false),
+                Some(v) => Some(v as u32),
+                None => None,
+            };
+            let limit = match input["limit"].as_u64() {
+                Some(v) if v > u32::MAX as u64 => return ("Error: limit value too large".to_string(), false),
+                Some(v) => Some(v as u32),
+                None => None,
+            };
 
             let _ = app.emit("agent-tool-start", json!({
                 "tab_id": tab_id, "tool": "read_file", "detail": path,
