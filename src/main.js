@@ -550,7 +550,7 @@ async function handleAgentInput(tabId, text) {
   } finally {
     // Re-fetch tab after await to handle race conditions
     const currentTab = tabs.get(tabId);
-    if (currentTab) {
+    if (currentTab && currentTab.agentStreaming) {
       currentTab.agentStreaming = false;
       currentTab._agentStreamBuffer = "";
       currentTab._agentStreamEl = null;
