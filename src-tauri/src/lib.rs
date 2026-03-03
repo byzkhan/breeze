@@ -355,21 +355,25 @@ async fn translate_command(prompt: String, cwd: String, history: Vec<String>) ->
 async fn run_shell_command(app: &AppHandle, tab_id: &str, command: &str) -> Result<String, String> {
     // Get CWD from the tab's shell process
     let cwd = {
-        let state = app.state::<PtyState>();
-        let sessions = state.sessions.lock().unwrap();
+        // Extract child_pid while holding the lock briefly
+        let child_pid = {
+            let state = app.state::<PtyState>();
+            let sessions = state.sessions.lock().unwrap();
+            sessions.get(tab_id).and_then(|s| s.child_pid)
+        }; // Lock released here
+
+        // Run lsof command outside the lock scope
         let mut found_cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        if let Some(session) = sessions.get(tab_id) {
-            if let Some(pid) = session.child_pid {
-                if let Ok(output) = std::process::Command::new("lsof")
-                    .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
-                    .output()
-                {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        if let Some(path) = line.strip_prefix('n') {
-                            found_cwd = path.to_string();
-                            break;
-                        }
+        if let Some(pid) = child_pid {
+            if let Ok(output) = std::process::Command::new("lsof")
+                .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(path) = line.strip_prefix('n') {
+                        found_cwd = path.to_string();
+                        break;
                     }
                 }
             }
