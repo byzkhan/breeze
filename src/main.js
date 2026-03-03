@@ -190,8 +190,8 @@ function showSuggestion(tabId, command, explanation, dangerous) {
   const icon = dangerous ? "\x1b[31m\u26A0\x1b[0m" : "\x1b[32m\u2713\x1b[0m";
   const cmdColor = dangerous ? "\x1b[31m" : "\x1b[36m";
   const lines = [
-    `  ${icon} ${cmdColor}${command}\x1b[0m`,
-    `  \x1b[90m${explanation}\x1b[0m`,
+    `  ${icon} ${cmdColor}${command.replace(/\n/g, ' ')}\x1b[0m`,
+    `  \x1b[90m${explanation.replace(/\n/g, ' ')}\x1b[0m`,
     `  \x1b[90mEnter to run \u00B7 Escape to cancel\x1b[0m`,
   ];
   writeAiLines(tabId, lines);
@@ -550,7 +550,7 @@ async function handleAgentInput(tabId, text) {
   } finally {
     // Re-fetch tab after await to handle race conditions
     const currentTab = tabs.get(tabId);
-    if (currentTab) {
+    if (currentTab && currentTab.agentStreaming) {
       currentTab.agentStreaming = false;
       currentTab._agentStreamBuffer = "";
       currentTab._agentStreamEl = null;
@@ -947,6 +947,7 @@ function hideEditor(tabId) {
 
   // Re-fit xterm since available height changed
   requestAnimationFrame(() => {
+    if (!tabs.has(tabId)) return;
     tab.fitAddon.fit();
   });
 }
@@ -1373,8 +1374,9 @@ function showToast(msg, duration = 3000) {
 document.querySelectorAll(".launcher-btn").forEach((btn) => {
   btn.addEventListener("click", async () => {
     if (!activeTabId) return;
-    const activeTab = tabs.get(activeTabId);
-    if (activeTab && activeTab.aiMode) hideSuggestion(activeTabId);
+    const tabId = activeTabId;
+    const activeTab = tabs.get(tabId);
+    if (activeTab && activeTab.aiMode) hideSuggestion(tabId);
 
     const cmd = btn.getAttribute("data-cmd");
     if (!cmd) return;
@@ -1386,7 +1388,7 @@ document.querySelectorAll(".launcher-btn").forEach((btn) => {
       return;
     }
 
-    const tab = tabs.get(activeTabId);
+    const tab = tabs.get(tabId);
     if (tab) {
       // Clear editor and hide it before sending command
       const textarea = tab.editorEl?.querySelector(".input-editor-textarea");
@@ -1398,10 +1400,10 @@ document.querySelectorAll(".launcher-btn").forEach((btn) => {
       }
       tab.atPrompt = false;
       tab.editorDraft = "";
-      hideEditor(activeTabId);
+      hideEditor(tabId);
     }
 
-    invoke("write_pty", { tabId: activeTabId, data: "\x15" + cmd + "\r" });
+    invoke("write_pty", { tabId: tabId, data: "\x15" + cmd + "\r" });
     recentCommands.push(cmd);
     if (recentCommands.length > MAX_HISTORY) recentCommands.shift();
   });

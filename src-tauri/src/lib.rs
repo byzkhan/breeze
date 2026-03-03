@@ -292,7 +292,9 @@ fn get_api_key() -> Result<String, String> {
         }
     }
     // 2. Fallback: ~/.breeze/api_key file
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "HOME or USERPROFILE not set".to_string())?;
     let path = std::path::PathBuf::from(home).join(".breeze").join("api_key");
     std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())
