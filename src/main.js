@@ -1319,10 +1319,13 @@ const ctxNode = document.getElementById("ctx-node");
 const ctxNodeText = document.getElementById("ctx-node-text");
 
 function friendlyCwd(path) {
-  const home = "/Users/" + path.split("/")[2];
   let friendly = path;
-  if (path.startsWith(home)) {
-    friendly = "~" + path.slice(home.length);
+  const segments = path.split("/");
+  if (segments[2]) {
+    const home = "/Users/" + segments[2];
+    if (path.startsWith(home)) {
+      friendly = "~" + path.slice(home.length);
+    }
   }
   const parts = friendly.split("/").filter(Boolean);
   if (parts.length <= 2) return parts.join(" \u2192 ");
