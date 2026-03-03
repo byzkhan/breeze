@@ -322,7 +322,7 @@ async fn translate_command(prompt: String, cwd: String, history: Vec<String>) ->
     }
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
     let res = client
@@ -469,7 +469,7 @@ async fn agent_chat(
 
     let mut full_text = String::new();
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
 
