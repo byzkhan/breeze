@@ -190,8 +190,8 @@ function showSuggestion(tabId, command, explanation, dangerous) {
   const icon = dangerous ? "\x1b[31m\u26A0\x1b[0m" : "\x1b[32m\u2713\x1b[0m";
   const cmdColor = dangerous ? "\x1b[31m" : "\x1b[36m";
   const lines = [
-    `  ${icon} ${cmdColor}${command}\x1b[0m`,
-    `  \x1b[90m${explanation}\x1b[0m`,
+    `  ${icon} ${cmdColor}${command.replace(/\n/g, ' ')}\x1b[0m`,
+    `  \x1b[90m${explanation.replace(/\n/g, ' ')}\x1b[0m`,
     `  \x1b[90mEnter to run \u00B7 Escape to cancel\x1b[0m`,
   ];
   writeAiLines(tabId, lines);
