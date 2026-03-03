@@ -1244,7 +1244,15 @@ listen("agent-tool-start", (event) => {
 
   const header = document.createElement("div");
   header.className = "agent-tool-header";
-  header.innerHTML = `<span class="agent-tool-icon running">${icon}</span><span class="agent-tool-label">${label}</span>`;
+  // Use textContent to prevent XSS from untrusted filenames/commands
+  const iconSpan = document.createElement("span");
+  iconSpan.className = "agent-tool-icon running";
+  iconSpan.textContent = icon;
+  const labelSpan = document.createElement("span");
+  labelSpan.className = "agent-tool-label";
+  labelSpan.textContent = label;
+  header.appendChild(iconSpan);
+  header.appendChild(labelSpan);
 
   block.appendChild(header);
 

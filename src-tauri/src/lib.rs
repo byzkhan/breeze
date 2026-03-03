@@ -241,6 +241,10 @@ fn get_shell_cwd(app: AppHandle, tab_id: String) -> Result<String, String> {
     let session = sessions.get(&tab_id).ok_or("Tab not found")?;
     let pid = session.child_pid.ok_or("Shell not started")?;
 
+    #[cfg(not(unix))]
+    return Err("CWD detection not supported on this platform".to_string());
+
+    #[cfg(unix)]
     let output = std::process::Command::new("lsof")
         .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
         .output()
@@ -273,8 +277,11 @@ fn get_git_branch(cwd: String) -> Result<String, String> {
 
 #[tauri::command]
 fn get_node_version() -> Result<String, String> {
+    // Set current_dir to a known-safe directory to prevent CWD-based binary injection on Windows
+    let safe_dir = std::env::temp_dir();
     let output = std::process::Command::new("node")
         .arg("--version")
+        .current_dir(safe_dir)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -395,31 +402,40 @@ async fn translate_command(prompt: String, cwd: String, history: Vec<String>) ->
         .ok_or_else(|| "Unexpected API response format".to_string())
 }
 
-/// Resolve the CWD from the tab's shell process via lsof.
+/// Resolve the CWD from the tab's shell process via lsof (Unix) or fallback to HOME.
 async fn resolve_cwd(app: &AppHandle, tab_id: &str) -> String {
-    let child_pid = {
-        let state = app.state::<PtyState>();
-        let sessions = state.sessions.lock().unwrap();
-        sessions.get(tab_id).and_then(|s| s.child_pid)
-    };
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| "/".to_string());
 
-    let mut found_cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    if let Some(pid) = child_pid {
-        if let Ok(output) = tokio::process::Command::new("lsof")
-            .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
-            .output()
-            .await
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if let Some(path) = line.strip_prefix('n') {
-                    found_cwd = path.to_string();
-                    break;
+    #[cfg(unix)]
+    {
+        let child_pid = {
+            let state = app.state::<PtyState>();
+            let sessions = state.sessions.lock().unwrap();
+            sessions.get(tab_id).and_then(|s| s.child_pid)
+        };
+
+        if let Some(pid) = child_pid {
+            if let Ok(output) = tokio::process::Command::new("lsof")
+                .args(["-d", "cwd", "-a", "-p", &pid.to_string(), "-Fn"])
+                .output()
+                .await
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(path) = line.strip_prefix('n') {
+                        return path.to_string();
+                    }
                 }
             }
         }
     }
-    found_cwd
+
+    #[cfg(not(unix))]
+    let _ = (app, tab_id); // suppress unused warnings on non-Unix
+
+    home
 }
 
 /// Resolve a path against the agent CWD (handles relative + absolute).
@@ -453,20 +469,38 @@ async fn execute_bash(app: &AppHandle, tab_id: &str, cwd: &str, command: &str, t
         "detail": command,
     }));
 
+    let child_result = tokio::process::Command::new(&shell)
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+
+    let child = match child_result {
+        Ok(c) => c,
+        Err(e) => {
+            let output = format!("Failed to execute: {e}");
+            let _ = app.emit("agent-tool-end", json!({
+                "tab_id": tab_id, "tool": "bash", "detail": command,
+                "output": output, "success": false,
+            }));
+            return (output, false);
+        }
+    };
+
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(timeout),
-        tokio::process::Command::new(&shell)
-            .arg("-c")
-            .arg(command)
-            .current_dir(cwd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output(),
+        child.wait_with_output(),
     )
     .await;
 
     let (mut output, success) = match result {
-        Err(_) => (format!("Command timed out after {timeout}s (use & for long-running processes)"), false),
+        Err(_) => {
+            // Timeout — kill_on_drop ensures cleanup when child is dropped here
+            (format!("Command timed out after {timeout}s (use & for long-running processes)"), false)
+        }
         Ok(Err(e)) => (format!("Failed to execute: {e}"), false),
         Ok(Ok(res)) => {
             let stdout = String::from_utf8_lossy(&res.stdout);
@@ -608,7 +642,10 @@ async fn execute_tool(app: &AppHandle, tab_id: &str, tool_name: &str, input: &se
             let (output, success) = execute_read_file(&cwd, path, offset, limit);
             let _ = app.emit("agent-tool-end", json!({
                 "tab_id": tab_id, "tool": "read_file", "detail": path,
-                "output": if output.len() > 500 { format!("{}... ({} chars)", &output[..500], output.len()) } else { output.clone() },
+                "output": if output.chars().count() > 500 {
+                    let trunc_at = output.char_indices().nth(500).map(|(i, _)| i).unwrap_or(output.len());
+                    format!("{}... ({} chars)", &output[..trunc_at], output.len())
+                } else { output.clone() },
                 "success": success,
             }));
             (output, success)
@@ -951,10 +988,17 @@ async fn process_stream(
         if let Some(data) = line.strip_prefix("data: ") {
             if data != "[DONE]" {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                    if event["type"].as_str() == Some("message_delta") {
-                        if let Some(sr) = event["delta"]["stop_reason"].as_str() {
-                            stop_reason = sr.to_string();
+                    match event["type"].as_str() {
+                        Some("message_delta") => {
+                            if let Some(sr) = event["delta"]["stop_reason"].as_str() {
+                                stop_reason = sr.to_string();
+                            }
                         }
+                        Some("error") => {
+                            let err_msg = event["error"]["message"].as_str().unwrap_or("Unknown stream error");
+                            return Err(err_msg.to_string());
+                        }
+                        _ => {}
                     }
                 }
             }
