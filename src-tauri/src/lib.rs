@@ -824,6 +824,82 @@ async fn agent_chat(
             }
         }
 
+        // Process any remaining data in sse_buf that doesn't end with a newline
+        let remaining = sse_buf.trim();
+        if !remaining.is_empty() {
+            if let Some(data) = remaining.strip_prefix("data: ") {
+                if data != "[DONE]" {
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                        let event_type = event["type"].as_str().unwrap_or("");
+
+                        match event_type {
+                            "content_block_start" => {
+                                let block_type =
+                                    event["content_block"]["type"].as_str().unwrap_or("");
+                                current_block_type = block_type.to_string();
+                                if block_type == "tool_use" {
+                                    current_tool_id = event["content_block"]["id"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string();
+                                    current_tool_name = event["content_block"]["name"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string();
+                                    current_tool_json = String::new();
+                                }
+                            }
+                            "content_block_delta" => {
+                                if current_block_type == "text" {
+                                    if let Some(text) = event["delta"]["text"].as_str() {
+                                        current_text.push_str(text);
+                                        full_text.push_str(text);
+                                        let _ = app.emit(
+                                            "agent-chunk",
+                                            json!({"tab_id": tab_id, "text": text}),
+                                        );
+                                    }
+                                } else if current_block_type == "tool_use" {
+                                    if let Some(json_chunk) =
+                                        event["delta"]["partial_json"].as_str()
+                                    {
+                                        current_tool_json.push_str(json_chunk);
+                                    }
+                                }
+                            }
+                            "content_block_stop" => {
+                                if current_block_type == "tool_use" {
+                                    tool_calls.push((
+                                        current_tool_id.clone(),
+                                        current_tool_name.clone(),
+                                        current_tool_json.clone(),
+                                    ));
+                                }
+                                current_block_type = String::new();
+                            }
+                            "message_delta" => {
+                                if let Some(sr) = event["delta"]["stop_reason"].as_str() {
+                                    stop_reason = sr.to_string();
+                                }
+                            }
+                            "error" => {
+                                let err_msg = event["error"]["message"]
+                                    .as_str()
+                                    .unwrap_or("Unknown stream error");
+                                return Err(err_msg.to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Validate that stream completed with a stop_reason
+        if stop_reason.is_empty() && tool_calls.is_empty() {
+            return Err("Stream ended without stop_reason".to_string());
+        }
+
         // Build the assistant message content blocks
         let mut assistant_content: Vec<serde_json::Value> = vec![];
         if !current_text.is_empty() {
