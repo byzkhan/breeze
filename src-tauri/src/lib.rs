@@ -438,40 +438,33 @@ async fn resolve_cwd(app: &AppHandle, tab_id: &str) -> String {
     home
 }
 
-/// Resolve a path against the agent CWD (handles relative + absolute).
-/// For relative paths, normalizes .. components and verifies the result stays within CWD.
-fn resolve_path(cwd: &str, path: &str) -> Result<std::path::PathBuf, String> {
-    let p = std::path::Path::new(path);
-    if p.is_absolute() {
-        return Ok(p.to_path_buf());
-    }
-
-    let joined = std::path::Path::new(cwd).join(p);
-    // Normalize by resolving .. components
+/// Normalize a path by resolving .. and . components without touching the filesystem.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
     let mut normalized = std::path::PathBuf::new();
-    for component in joined.components() {
+    for component in path.components() {
         match component {
             std::path::Component::ParentDir => { normalized.pop(); }
             c => normalized.push(c.as_os_str()),
         }
     }
+    normalized
+}
 
-    // Verify the resolved path is still within CWD
-    let cwd_normalized = {
-        let mut n = std::path::PathBuf::new();
-        for component in std::path::Path::new(cwd).components() {
-            match component {
-                std::path::Component::ParentDir => { n.pop(); }
-                c => n.push(c.as_os_str()),
-            }
-        }
-        n
+/// Resolve a path against the agent CWD and verify it stays within CWD.
+fn resolve_path(cwd: &str, path: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    let resolved = if p.is_absolute() {
+        normalize_path(p)
+    } else {
+        normalize_path(&std::path::Path::new(cwd).join(p))
     };
-    if !normalized.starts_with(&cwd_normalized) {
+
+    let cwd_normalized = normalize_path(std::path::Path::new(cwd));
+    if !resolved.starts_with(&cwd_normalized) {
         return Err(format!("Path '{}' resolves outside working directory", path));
     }
 
-    Ok(normalized)
+    Ok(resolved)
 }
 
 /// Truncate output to a character limit.
