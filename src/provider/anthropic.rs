@@ -142,6 +142,18 @@ async fn parse_sse_stream(
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     let event_type = event["type"].as_str().unwrap_or("");
                     match event_type {
+                        "message_start" => {
+                            if let Some(usage) = event["message"]["usage"].as_object() {
+                                let input = usage.get("input_tokens")
+                                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                                let output = usage.get("output_tokens")
+                                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                                let _ = tx.send(StreamEvent::Usage {
+                                    input_tokens: input,
+                                    output_tokens: output,
+                                }).await;
+                            }
+                        }
                         "content_block_start" => {
                             let block_type =
                                 event["content_block"]["type"].as_str().unwrap_or("");
@@ -165,7 +177,13 @@ async fn parse_sse_stream(
                             }
                         }
                         "content_block_delta" => {
-                            if current_block_type == "text" {
+                            if current_block_type == "thinking" {
+                                if let Some(thinking) = event["delta"]["thinking"].as_str() {
+                                    let _ = tx.send(StreamEvent::ThinkingDelta(
+                                        thinking.to_string(),
+                                    )).await;
+                                }
+                            } else if current_block_type == "text" {
                                 if let Some(text) = event["delta"]["text"].as_str() {
                                     let _ =
                                         tx.send(StreamEvent::TextDelta(text.to_string())).await;
@@ -205,6 +223,14 @@ async fn parse_sse_stream(
                                 let _ =
                                     tx.send(StreamEvent::Done { stop_reason: stop }).await;
                             }
+                            if let Some(usage) = event["usage"].as_object() {
+                                let output = usage.get("output_tokens")
+                                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                                let _ = tx.send(StreamEvent::Usage {
+                                    input_tokens: 0,
+                                    output_tokens: output,
+                                }).await;
+                            }
                         }
                         "error" => {
                             let err_msg = event["error"]["message"]
@@ -231,7 +257,13 @@ async fn parse_sse_stream(
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     match event["type"].as_str() {
                         Some("content_block_delta") => {
-                            if current_block_type == "text" {
+                            if current_block_type == "thinking" {
+                                if let Some(thinking) = event["delta"]["thinking"].as_str() {
+                                    let _ = tx.send(StreamEvent::ThinkingDelta(
+                                        thinking.to_string(),
+                                    )).await;
+                                }
+                            } else if current_block_type == "text" {
                                 if let Some(text) = event["delta"]["text"].as_str() {
                                     let _ =
                                         tx.send(StreamEvent::TextDelta(text.to_string())).await;

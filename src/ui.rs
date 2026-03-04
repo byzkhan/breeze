@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
@@ -10,6 +10,16 @@ use crossterm::{execute, terminal};
 pub struct SpinnerHandle {
     stop: Arc<AtomicBool>,
     handle: Option<tokio::task::JoinHandle<()>>,
+    message: Arc<Mutex<String>>,
+}
+
+impl SpinnerHandle {
+    /// Update the spinner message while it's running.
+    pub fn set_message(&self, msg: &str) {
+        if let Ok(mut m) = self.message.lock() {
+            *m = msg.to_string();
+        }
+    }
 }
 
 pub struct Ui {
@@ -29,9 +39,11 @@ impl Ui {
 
     // ── Spinner ────────────────────────────────────────────────
 
-    pub fn start_spinner(&self, iteration: u32) -> SpinnerHandle {
+    pub fn start_spinner(&self, iteration: u32, max_iterations: u32) -> SpinnerHandle {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
+        let message = Arc::new(Mutex::new("Thinking...".to_string()));
+        let message_clone = message.clone();
         let handle = tokio::spawn(async move {
             const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let start = Instant::now();
@@ -42,9 +54,10 @@ impl Ui {
                 }
                 let elapsed = start.elapsed().as_secs();
                 let frame = FRAMES[i % FRAMES.len()];
+                let msg = message_clone.lock().map(|m| m.clone()).unwrap_or_default();
                 eprint!(
-                    "\r{} Thinking... ({iteration}/{}) {elapsed}s",
-                    frame, 50
+                    "\r{} {} ({iteration}/{max_iterations}) {elapsed}s    ",
+                    frame, msg
                 );
                 let _ = io::stderr().flush();
                 i += 1;
@@ -57,6 +70,7 @@ impl Ui {
         SpinnerHandle {
             stop,
             handle: Some(handle),
+            message,
         }
     }
 
@@ -90,41 +104,61 @@ impl Ui {
 
     pub fn tool_use_start(&mut self, name: &str) {
         self.tool_input_buf.clear();
-        let (icon, color) = tool_style(name);
-        let _ = execute!(io::stdout(), SetForegroundColor(color));
-        match name {
-            "bash" => print!("\n{icon} $ "),
-            "write_file" => print!("\n{icon} Writing "),
-            "edit_file" => print!("\n{icon} Editing "),
-            "read_file" => print!("\n{icon} Reading "),
-            _ => print!("\n{icon} {name} "),
+        if name == "bash" {
+            let (icon, color) = tool_style(name);
+            let _ = execute!(io::stdout(), SetForegroundColor(color));
+            print!("\n{icon} $ ");
+            let _ = execute!(io::stdout(), ResetColor);
+            let _ = io::stdout().flush();
         }
-        let _ = execute!(io::stdout(), ResetColor);
-        let _ = io::stdout().flush();
+        // For non-bash tools, we print nothing here — summary comes from tool_use_complete
     }
 
     pub fn tool_input_delta(&mut self, tool_name: &str, chunk: &str) {
         self.tool_input_buf.push_str(chunk);
-
-        match tool_name {
-            "bash" => {
-                // Stream the command text
-                print!("{}", chunk);
-                let _ = io::stdout().flush();
-            }
-            "write_file" => {
-                // Show path from first chunk, then stream content
-                // The input is JSON being assembled, so we stream partial
-                print!("{}", chunk);
-                let _ = io::stdout().flush();
-            }
-            "read_file" | "edit_file" => {
-                // For read/edit, just stream the delta
-                print!("{}", chunk);
-                let _ = io::stdout().flush();
-            }
-            _ => {}
+        if tool_name == "bash" {
+            print!("{}", chunk);
+            let _ = io::stdout().flush();
         }
+        // For non-bash tools, silently accumulate — no output
+    }
+
+    /// Called when a tool_use block is fully received. Prints a one-line summary
+    /// for non-bash tools (bash is already streamed).
+    pub fn tool_use_complete(&mut self, name: &str, input_json: &str) {
+        if name == "bash" {
+            // Already streamed inline
+            return;
+        }
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(input_json).unwrap_or(serde_json::Value::Null);
+        let (icon, color) = tool_style(name);
+
+        let _ = execute!(io::stdout(), SetForegroundColor(color));
+        match name {
+            "write_file" => {
+                let path = parsed["path"].as_str().unwrap_or("unknown");
+                let line_count = parsed["content"]
+                    .as_str()
+                    .map(|c| c.lines().count())
+                    .unwrap_or(0);
+                print!("\n{icon} Write {path} ({line_count} lines)");
+            }
+            "edit_file" => {
+                let path = parsed["path"].as_str().unwrap_or("unknown");
+                print!("\n{icon} Edit {path}");
+            }
+            "read_file" => {
+                let path = parsed["path"].as_str().unwrap_or("unknown");
+                print!("\n{icon} Read {path}");
+            }
+            _ => {
+                print!("\n{icon} {name}");
+            }
+        }
+        let _ = execute!(io::stdout(), ResetColor);
+        let _ = io::stdout().flush();
     }
 
     pub fn tool_result(&mut self, name: &str, output: &str, success: bool) {
@@ -138,12 +172,10 @@ impl Ui {
         }
         let _ = execute!(io::stdout(), ResetColor);
 
-        // Show a compact summary of the output
-        let first_line = output.lines().next().unwrap_or(output);
+        let _ = execute!(io::stdout(), SetForegroundColor(Color::DarkGrey));
         if name == "bash" {
             // For bash, show first few lines of output
             let lines: Vec<&str> = output.lines().take(10).collect();
-            let _ = execute!(io::stdout(), SetForegroundColor(Color::DarkGrey));
             for line in &lines {
                 println!("  {line}");
             }
@@ -151,13 +183,23 @@ impl Ui {
             if total > 10 {
                 println!("  ... ({} more lines)", total - 10);
             }
-            let _ = execute!(io::stdout(), ResetColor);
         } else {
-            let _ = execute!(io::stdout(), SetForegroundColor(Color::DarkGrey));
+            // For non-bash tools, show first line of output
+            let first_line = output.lines().next().unwrap_or(output);
             println!("{first_line}");
-            let _ = execute!(io::stdout(), ResetColor);
         }
+        let _ = execute!(io::stdout(), ResetColor);
         self.tool_input_buf.clear();
+    }
+
+    // ── Token usage ───────────────────────────────────────────
+
+    pub fn print_usage(&self, input_tokens: u64, output_tokens: u64) {
+        let _ = execute!(io::stdout(), SetForegroundColor(Color::DarkGrey));
+        let fmt_in = format_tokens(input_tokens);
+        let fmt_out = format_tokens(output_tokens);
+        println!("  tokens: {fmt_in} in / {fmt_out} out");
+        let _ = execute!(io::stdout(), ResetColor);
     }
 
     // ── Retry ──────────────────────────────────────────────────
@@ -241,5 +283,15 @@ fn tool_style(name: &str) -> (&'static str, Color) {
         "edit_file" => ("✏️ ", Color::Yellow),
         "read_file" => ("📄", Color::DarkGrey),
         _ => ("🔧", Color::White),
+    }
+}
+
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        format!("{n}")
     }
 }

@@ -45,9 +45,11 @@ pub struct Message {
 #[allow(dead_code)]
 pub enum StreamEvent {
     TextDelta(String),
+    ThinkingDelta(String),
     ToolUseStart { id: String, name: String },
     ToolInputDelta(String),
     ToolUseEnd { id: String, name: String, input: String },
+    Usage { input_tokens: u64, output_tokens: u64 },
     Done { stop_reason: StopReason },
     Error(String),
     RetryAttempt { attempt: u32, max_retries: u32, delay_secs: u64, reason: String },
