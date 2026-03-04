@@ -366,7 +366,7 @@ fn get_git_diff(cwd: &str) -> String {
         .output();
 
     match output {
-        Ok(o) => {
+        Ok(o) if o.status.success() => {
             let diff = String::from_utf8_lossy(&o.stdout).to_string();
             if diff.is_empty() {
                 // Also check for untracked files
@@ -390,6 +390,10 @@ fn get_git_diff(cwd: &str) -> String {
                     diff
                 }
             }
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            format!("(git diff failed: {})", stderr.trim())
         }
         Err(_) => "(git diff failed)".to_string(),
     }
