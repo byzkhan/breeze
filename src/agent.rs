@@ -336,9 +336,59 @@ impl Agent {
 
 // ── Helper functions ───────────────────────────────────────────
 
-/// Compress older tool_result observations to save context.
-/// Keeps last 5 tool results at full detail, compresses older ones.
+/// Compress older observations to save context.
+/// - Strips file content from old write_file/edit_file ToolUse inputs (biggest win)
+/// - Truncates long ToolResult outputs
+/// Keeps the last 3 tool interactions at full detail.
 fn compress_observations(messages: &mut Vec<Message>) {
+    // ── 1. Compress old ToolUse inputs (assistant messages) ───────
+    // write_file inputs contain full file content; strip it from older calls.
+    let mut tool_use_indices: Vec<(usize, usize)> = vec![];
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        for (block_idx, block) in msg.content.iter().enumerate() {
+            if matches!(block, ContentBlock::ToolUse { .. }) {
+                tool_use_indices.push((msg_idx, block_idx));
+            }
+        }
+    }
+
+    if tool_use_indices.len() > 3 {
+        let to_compress = tool_use_indices.len() - 3;
+        for &(msg_idx, block_idx) in &tool_use_indices[..to_compress] {
+            if let Some(ContentBlock::ToolUse { name, input, .. }) =
+                messages[msg_idx].content.get_mut(block_idx)
+            {
+                match name.as_str() {
+                    "write_file" => {
+                        // Keep path, replace content with placeholder
+                        if let Some(content) = input.get("content").and_then(|c| c.as_str()) {
+                            let lines = content.lines().count();
+                            let path = input["path"].as_str().unwrap_or("?");
+                            *input = serde_json::json!({
+                                "path": path,
+                                "content": format!("[compressed: {lines} lines]")
+                            });
+                        }
+                    }
+                    "edit_file" => {
+                        // Keep path, compress old/new content
+                        let path = input["path"].as_str().unwrap_or("?").to_string();
+                        *input = serde_json::json!({
+                            "path": path,
+                            "old_string": "[compressed]",
+                            "new_string": "[compressed]"
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // ── 2. Compress old ToolResult outputs (user messages) ───────
     let mut tool_result_indices: Vec<(usize, usize)> = vec![];
     for (msg_idx, msg) in messages.iter().enumerate() {
         for (block_idx, block) in msg.content.iter().enumerate() {
@@ -348,28 +398,27 @@ fn compress_observations(messages: &mut Vec<Message>) {
         }
     }
 
-    if tool_result_indices.len() <= 5 {
-        return;
-    }
-
-    let to_compress = tool_result_indices.len() - 5;
-    for &(msg_idx, block_idx) in &tool_result_indices[..to_compress] {
-        if let Some(ContentBlock::ToolResult { content, .. }) =
-            messages[msg_idx].content.get_mut(block_idx)
-        {
-            let lines: Vec<&str> = content.lines().collect();
-            if lines.len() > 40 {
-                let mut compressed = String::new();
-                for line in &lines[..20] {
-                    compressed.push_str(line);
-                    compressed.push('\n');
+    if tool_result_indices.len() > 3 {
+        let to_compress = tool_result_indices.len() - 3;
+        for &(msg_idx, block_idx) in &tool_result_indices[..to_compress] {
+            if let Some(ContentBlock::ToolResult { content, .. }) =
+                messages[msg_idx].content.get_mut(block_idx)
+            {
+                let lines: Vec<&str> = content.lines().collect();
+                if lines.len() > 20 {
+                    let mut compressed = String::new();
+                    for line in &lines[..10] {
+                        compressed.push_str(line);
+                        compressed.push('\n');
+                    }
+                    compressed
+                        .push_str(&format!("... ({} lines omitted)\n", lines.len() - 20));
+                    for line in &lines[lines.len() - 10..] {
+                        compressed.push_str(line);
+                        compressed.push('\n');
+                    }
+                    *content = compressed;
                 }
-                compressed.push_str(&format!("... ({} lines omitted)\n", lines.len() - 40));
-                for line in &lines[lines.len() - 20..] {
-                    compressed.push_str(line);
-                    compressed.push('\n');
-                }
-                *content = compressed;
             }
         }
     }
