@@ -117,7 +117,7 @@ impl Agent {
             compress_observations(&mut self.state.messages);
 
             // Start spinner
-            let mut spinner = Some(ui.start_spinner(self.state.iteration));
+            let mut spinner = Some(ui.start_spinner(self.state.iteration, MAX_ITERATIONS));
 
             // Call provider
             let tool_defs = self.tools.definitions();
@@ -136,6 +136,8 @@ impl Agent {
             let mut tool_calls: Vec<(String, String, String)> = vec![]; // (id, name, input_json)
             let mut stop_reason = StopReason::EndTurn;
             let mut current_tool_name = String::new();
+            let mut total_input_tokens: u64 = 0;
+            let mut total_output_tokens: u64 = 0;
 
             while let Some(event) = rx.recv().await {
                 match event {
@@ -146,7 +148,21 @@ impl Agent {
                         ui.print_text_delta(&text);
                         current_text.push_str(&text);
                     }
+                    StreamEvent::ThinkingDelta(_) => {
+                        // Let spinner keep showing "Thinking..."
+                    }
                     StreamEvent::ToolUseStart { id: _, name } => {
+                        // Update spinner message before stopping for bash
+                        if let Some(ref s) = spinner {
+                            let verb = match name.as_str() {
+                                "write_file" => "Writing file...",
+                                "edit_file" => "Editing file...",
+                                "read_file" => "Reading file...",
+                                "bash" => "Running command...",
+                                _ => "Working...",
+                            };
+                            s.set_message(verb);
+                        }
                         if let Some(s) = spinner.take() {
                             ui.stop_spinner(s);
                         }
@@ -157,7 +173,12 @@ impl Agent {
                         ui.tool_input_delta(&current_tool_name, &chunk);
                     }
                     StreamEvent::ToolUseEnd { id, name, input } => {
+                        ui.tool_use_complete(&name, &input);
                         tool_calls.push((id, name, input));
+                    }
+                    StreamEvent::Usage { input_tokens, output_tokens } => {
+                        total_input_tokens += input_tokens;
+                        total_output_tokens += output_tokens;
                     }
                     StreamEvent::Done { stop_reason: sr } => {
                         stop_reason = sr;
@@ -187,6 +208,11 @@ impl Agent {
             // Ensure newline after streamed text
             if !current_text.is_empty() {
                 ui.finish_text();
+            }
+
+            // Show token usage for this turn
+            if total_input_tokens > 0 || total_output_tokens > 0 {
+                ui.print_usage(total_input_tokens, total_output_tokens);
             }
 
             full_text.push_str(&current_text);
