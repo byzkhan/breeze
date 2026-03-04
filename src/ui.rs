@@ -102,59 +102,46 @@ impl Ui {
 
     // ── Tool display ───────────────────────────────────────────
 
-    pub fn tool_use_start(&mut self, name: &str) {
+    pub fn tool_use_start(&mut self, _name: &str) {
         self.tool_input_buf.clear();
-        if name == "bash" {
-            let (icon, color) = tool_style(name);
-            let _ = execute!(io::stdout(), SetForegroundColor(color));
-            print!("\n{icon} $ ");
-            let _ = execute!(io::stdout(), ResetColor);
-            let _ = io::stdout().flush();
-        }
-        // For non-bash tools, we print nothing here — summary comes from tool_use_complete
+        // All tools print their summary from tool_use_complete — nothing here
     }
 
-    pub fn tool_input_delta(&mut self, tool_name: &str, chunk: &str) {
+    pub fn tool_input_delta(&mut self, _tool_name: &str, chunk: &str) {
+        // Silently accumulate for all tools — no streaming output
         self.tool_input_buf.push_str(chunk);
-        if tool_name == "bash" {
-            print!("{}", chunk);
-            let _ = io::stdout().flush();
-        }
-        // For non-bash tools, silently accumulate — no output
     }
 
-    /// Called when a tool_use block is fully received. Prints a one-line summary
-    /// for non-bash tools (bash is already streamed).
+    /// Called when a tool_use block is fully received. Prints a one-line summary.
     pub fn tool_use_complete(&mut self, name: &str, input_json: &str) {
-        if name == "bash" {
-            // Already streamed inline
-            return;
-        }
-
         let parsed: serde_json::Value =
             serde_json::from_str(input_json).unwrap_or(serde_json::Value::Null);
         let (icon, color) = tool_style(name);
 
         let _ = execute!(io::stdout(), SetForegroundColor(color));
         match name {
+            "bash" => {
+                let cmd = parsed["command"].as_str().unwrap_or("...");
+                println!("\n{icon} $ {cmd}");
+            }
             "write_file" => {
                 let path = parsed["path"].as_str().unwrap_or("unknown");
                 let line_count = parsed["content"]
                     .as_str()
                     .map(|c| c.lines().count())
                     .unwrap_or(0);
-                print!("\n{icon} Write {path} ({line_count} lines)");
+                println!("\n{icon} Write {path} ({line_count} lines)");
             }
             "edit_file" => {
                 let path = parsed["path"].as_str().unwrap_or("unknown");
-                print!("\n{icon} Edit {path}");
+                println!("\n{icon} Edit {path}");
             }
             "read_file" => {
                 let path = parsed["path"].as_str().unwrap_or("unknown");
-                print!("\n{icon} Read {path}");
+                println!("\n{icon} Read {path}");
             }
             _ => {
-                print!("\n{icon} {name}");
+                println!("\n{icon} {name}");
             }
         }
         let _ = execute!(io::stdout(), ResetColor);
