@@ -65,12 +65,16 @@ async fn main() -> Result<()> {
         .model
         .unwrap_or_else(|| config.default_model.clone());
 
-    let cwd = cli.cwd.unwrap_or_else(|| {
-        std::env::current_dir()
-            .expect("Failed to get current working directory. Use --cwd to specify one.")
-            .to_string_lossy()
-            .to_string()
-    });
+    let cwd = match cli.cwd {
+        Some(c) => c,
+        None => {
+            let dir = std::env::current_dir()
+                .expect("Failed to get current working directory. Use --cwd to specify one.");
+            dir.to_str()
+                .expect("Current directory path contains invalid UTF-8. Use --cwd to specify one.")
+                .to_string()
+        }
+    };
 
     let mut harness_enabled = cli.harness || config.harness_enabled;
     let mut ui = Ui::new();

@@ -103,7 +103,7 @@ impl Harness {
 
         // Phase 4: Auto-verify
         ui.print_info("[harness] Running auto-verification...");
-        let verify_output = self.auto_verify();
+        let verify_output = self.auto_verify().await;
 
         // Phase 5: Judge
         ui.print_info("[harness] Running judge...");
@@ -113,7 +113,24 @@ impl Harness {
             message, plan_output, git_diff, verify_output
         );
 
-        let judge_output = self.run_judge(&judge_input, ui).await?;
+        let judge_output = match self.run_judge(&judge_input, ui).await {
+            Ok(output) => output,
+            Err(e) => {
+                ui.print_error(&format!("[harness] Judge failed: {}", e));
+                if let Some(cp) = checkpoint {
+                    ui.print_info("[harness] Rolling back changes...");
+                    let rolled_back = cp.rollback().is_ok();
+                    return Ok(HarnessResult::Failed {
+                        reason: format!("Judge error: {}", e),
+                        rolled_back,
+                    });
+                }
+                return Ok(HarnessResult::Failed {
+                    reason: format!("Judge error: {}", e),
+                    rolled_back: false,
+                });
+            }
+        };
         let verdict = parse_verdict(&judge_output);
 
         match verdict {
@@ -195,66 +212,60 @@ impl Harness {
 
     // ── Auto-verification ─────────────────────────────────────
 
-    fn auto_verify(&self) -> String {
+    async fn auto_verify(&self) -> String {
         let mut results = String::new();
 
-        // Try cargo check first
-        match Command::new("cargo")
-            .args(["check", "--message-format=short"])
-            .current_dir(&self.cwd)
-            .output()
-        {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if output.status.success() {
-                    results.push_str("cargo check: OK\n");
-                } else {
-                    results.push_str("cargo check: FAILED\n");
-                    if !stdout.is_empty() {
-                        results.push_str(&stdout);
-                    }
-                    if !stderr.is_empty() {
-                        results.push_str(&stderr);
-                    }
-                }
-            }
-            Err(_) => {
-                // Not a Rust project or cargo not available — that's fine
-                results.push_str("cargo check: skipped (not available)\n");
-            }
-        }
+        // Try cargo check (120s timeout)
+        results.push_str(&self.run_cargo_cmd("check", &["check", "--message-format=short"], 120).await);
 
-        // Try cargo test (blocking — no timeout enforced at this level)
-        match Command::new("cargo")
-            .args(["test", "--", "--test-threads=1"])
+        // Try cargo test (180s timeout)
+        results.push_str(&self.run_cargo_cmd("test", &["test", "--", "--test-threads=1"], 180).await);
+
+        results
+    }
+
+    async fn run_cargo_cmd(&self, label: &str, args: &[&str], timeout_secs: u64) -> String {
+        let child = tokio::process::Command::new("cargo")
+            .args(args)
             .current_dir(&self.cwd)
-            .output()
-        {
-            Ok(output) => {
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn();
+
+        let child = match child {
+            Ok(c) => c,
+            Err(_) => return format!("cargo {}: skipped (not available)\n", label),
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            child.wait_with_output(),
+        )
+        .await;
+
+        match result {
+            Err(_) => format!("cargo {}: TIMED OUT after {}s\n", label, timeout_secs),
+            Ok(Err(e)) => format!("cargo {}: ERROR ({})\n", label, e),
+            Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 if output.status.success() {
-                    results.push_str("cargo test: OK\n");
+                    format!("cargo {}: OK\n", label)
                 } else {
-                    results.push_str("cargo test: FAILED\n");
-                    // Truncate test output to avoid bloating the judge context
+                    let mut out = format!("cargo {}: FAILED\n", label);
                     let combined = format!("{}{}", stdout, stderr);
                     let char_count = combined.chars().count();
                     let truncated: String = combined.chars().take(2000).collect();
-                    results.push_str(&truncated);
+                    out.push_str(&truncated);
                     if char_count > 2000 {
-                        results.push_str("\n... (truncated)");
+                        out.push_str("\n... (truncated)");
                     }
-                    results.push('\n');
+                    out.push('\n');
+                    out
                 }
             }
-            Err(_) => {
-                results.push_str("cargo test: skipped (not available)\n");
-            }
         }
-
-        results
     }
 }
 
