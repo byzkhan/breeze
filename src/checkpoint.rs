@@ -31,7 +31,7 @@ impl Checkpoint {
         // Returns empty string if the working tree is clean.
         // Non-zero exit = actual failure (disk full, corrupted index, etc.).
         let output = Command::new("git")
-            .args(["stash", "create"])
+            .args(["stash", "create", "--include-untracked"])
             .current_dir(cwd)
             .output()
             .context("Failed to create git stash")?;
@@ -55,18 +55,26 @@ impl Checkpoint {
     /// Discards all current changes and restores the stashed state.
     pub fn rollback(&self) -> Result<()> {
         // Discard all working tree changes
-        let _ = Command::new("git")
+        let checkout = Command::new("git")
             .args(["checkout", "."])
             .current_dir(&self.cwd)
             .output()
-            .context("Failed to git checkout .")?;
+            .context("Failed to run git checkout .")?;
+        if !checkout.status.success() {
+            let stderr = String::from_utf8_lossy(&checkout.stderr);
+            bail!("git checkout . failed: {}", stderr.trim());
+        }
 
         // Remove untracked files
-        let _ = Command::new("git")
+        let clean = Command::new("git")
             .args(["clean", "-fd"])
             .current_dir(&self.cwd)
             .output()
-            .context("Failed to git clean")?;
+            .context("Failed to run git clean -fd")?;
+        if !clean.status.success() {
+            let stderr = String::from_utf8_lossy(&clean.stderr);
+            bail!("git clean -fd failed: {}", stderr.trim());
+        }
 
         // Restore the stashed state if there was one
         if !self.is_clean {

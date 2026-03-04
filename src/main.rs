@@ -65,9 +65,12 @@ async fn main() -> Result<()> {
         .model
         .unwrap_or_else(|| config.default_model.clone());
 
-    let cwd = cli
-        .cwd
-        .unwrap_or_else(|| std::env::current_dir().unwrap().to_string_lossy().to_string());
+    let cwd = cli.cwd.unwrap_or_else(|| {
+        std::env::current_dir()
+            .expect("Failed to get current working directory. Use --cwd to specify one.")
+            .to_string_lossy()
+            .to_string()
+    });
 
     let mut harness_enabled = cli.harness || config.harness_enabled;
     let mut ui = Ui::new();
@@ -255,8 +258,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn first_line(s: &str) -> &str {
-    s.lines().next().unwrap_or(s).get(..80).unwrap_or(s.lines().next().unwrap_or(s))
+fn first_line(s: &str) -> String {
+    s.lines()
+        .next()
+        .unwrap_or(s)
+        .chars()
+        .take(80)
+        .collect()
 }
 
 /// Set up Ctrl+C handling. Rustyline handles SIGINT during readline (returns

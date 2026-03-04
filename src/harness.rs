@@ -240,9 +240,10 @@ impl Harness {
                     results.push_str("cargo test: FAILED\n");
                     // Truncate test output to avoid bloating the judge context
                     let combined = format!("{}{}", stdout, stderr);
+                    let char_count = combined.chars().count();
                     let truncated: String = combined.chars().take(2000).collect();
                     results.push_str(&truncated);
-                    if combined.len() > 2000 {
+                    if char_count > 2000 {
                         results.push_str("\n... (truncated)");
                     }
                     results.push('\n');

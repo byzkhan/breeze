@@ -241,6 +241,11 @@ async fn parse_sse_stream(
                                     event["delta"]["partial_json"].as_str()
                                 {
                                     current_tool_json.push_str(json_chunk);
+                                    let _ = tx
+                                        .send(StreamEvent::ToolInputDelta(
+                                            json_chunk.to_string(),
+                                        ))
+                                        .await;
                                 }
                             }
                         }
