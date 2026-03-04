@@ -29,11 +29,17 @@ impl Checkpoint {
 
         // git stash create: creates a stash commit but doesn't store it in the reflog.
         // Returns empty string if the working tree is clean.
+        // Non-zero exit = actual failure (disk full, corrupted index, etc.).
         let output = Command::new("git")
             .args(["stash", "create"])
             .current_dir(cwd)
             .output()
             .context("Failed to create git stash")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git stash create failed: {}", stderr.trim());
+        }
 
         let reference = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let is_clean = reference.is_empty();

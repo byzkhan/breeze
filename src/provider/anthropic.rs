@@ -254,6 +254,7 @@ async fn parse_sse_stream(
                                     })
                                     .await;
                             }
+                            current_block_type.clear();
                         }
                         Some("message_delta") => {
                             if let Some(sr) = event["delta"]["stop_reason"].as_str() {
@@ -387,8 +388,8 @@ impl LlmProvider for AnthropicProvider {
                         }
                         let _ = tx_clone
                             .send(StreamEvent::Error(format!(
-                                "Connection failed after {} retries: {}",
-                                max_retries, e
+                                "Request failed: {}",
+                                e
                             )))
                             .await;
                         return;

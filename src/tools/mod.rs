@@ -58,8 +58,10 @@ impl ToolRegistry {
         reg
     }
 
-    /// Build a read-only registry (bash + read_file only) for planner and judge phases.
-    pub fn read_only_registry() -> Self {
+    /// Build an exploration registry (bash + read_file) for planner and judge phases.
+    /// Bash is included for search/inspection commands (grep, find, git log, cargo check).
+    /// File-write tools are excluded to prevent accidental modifications.
+    pub fn exploration_registry() -> Self {
         let mut reg = Self::new();
         reg.register(Box::new(bash::BashTool));
         reg.register(Box::new(file::ReadFileTool));

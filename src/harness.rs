@@ -88,10 +88,10 @@ impl Harness {
                 // Rollback on worker failure
                 if let Some(cp) = checkpoint {
                     ui.print_info("[harness] Rolling back changes...");
-                    let _ = cp.rollback();
+                    let rolled_back = cp.rollback().is_ok();
                     return Ok(HarnessResult::Failed {
                         reason: format!("Worker {} failed: {}", i + 1, e),
-                        rolled_back: true,
+                        rolled_back,
                     });
                 }
                 return Ok(HarnessResult::Failed {
@@ -128,10 +128,10 @@ impl Harness {
                 ui.print_error(&format!("[harness] FAIL: {}", reason));
                 if let Some(cp) = checkpoint {
                     ui.print_info("[harness] Rolling back changes...");
-                    let _ = cp.rollback();
+                    let rolled_back = cp.rollback().is_ok();
                     Ok(HarnessResult::Failed {
                         reason,
-                        rolled_back: true,
+                        rolled_back,
                     })
                 } else {
                     Ok(HarnessResult::Failed {
@@ -150,7 +150,7 @@ impl Harness {
             self.api_key.clone(),
             self.model.clone(),
         ));
-        let tools = ToolRegistry::read_only_registry();
+        let tools = ToolRegistry::exploration_registry();
         let prompt = prompts::planner_prompt(&self.cwd);
         let mut agent = Agent::new_with_prompt(self.cwd.clone(), provider, tools, prompt);
         agent.run(message, ui).await
@@ -177,7 +177,7 @@ impl Harness {
             self.api_key.clone(),
             self.model.clone(),
         ));
-        let tools = ToolRegistry::read_only_registry();
+        let tools = ToolRegistry::exploration_registry();
         let prompt = prompts::judge_prompt(&self.cwd);
         let mut agent = Agent::new_with_prompt(self.cwd.clone(), provider, tools, prompt);
         agent.run(input, ui).await
@@ -225,7 +225,7 @@ impl Harness {
             }
         }
 
-        // Try cargo test with a timeout
+        // Try cargo test (blocking — no timeout enforced at this level)
         match Command::new("cargo")
             .args(["test", "--", "--test-threads=1"])
             .current_dir(&self.cwd)

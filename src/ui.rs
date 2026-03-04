@@ -200,25 +200,27 @@ impl Ui {
         let _ = execute!(io::stderr(), ResetColor);
         let _ = io::stderr().flush();
 
-        // Read single character using crossterm raw mode
+        // Read single character using crossterm raw mode.
+        // Always disable raw mode on exit, even if poll/read returns Err.
         let result = (|| -> io::Result<bool> {
             terminal::enable_raw_mode()?;
             let answer = loop {
-                if crossterm::event::poll(std::time::Duration::from_secs(30))? {
-                    if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                        match key.code {
+                match crossterm::event::poll(std::time::Duration::from_secs(30)) {
+                    Ok(true) => match crossterm::event::read() {
+                        Ok(crossterm::event::Event::Key(key)) => match key.code {
                             crossterm::event::KeyCode::Char('y' | 'Y') => break true,
                             crossterm::event::KeyCode::Char('n' | 'N')
                             | crossterm::event::KeyCode::Enter => break false,
                             _ => {}
-                        }
-                    }
-                } else {
-                    // Timeout — deny
-                    break false;
+                        },
+                        Ok(_) => {}
+                        Err(_) => break false,
+                    },
+                    Ok(false) => break false, // Timeout — deny
+                    Err(_) => break false,
                 }
             };
-            terminal::disable_raw_mode()?;
+            let _ = terminal::disable_raw_mode();
             Ok(answer)
         })();
 

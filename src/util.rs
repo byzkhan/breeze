@@ -1,12 +1,16 @@
 use std::path::{Component, Path, PathBuf};
 
 /// Normalize a path by resolving `..` and `.` components without touching the filesystem.
+/// Absolute paths remain absolute even if `..` would escape the root.
 pub fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
             Component::ParentDir => {
-                normalized.pop();
+                // Don't pop past root — if we're at "/" or a drive root, keep it.
+                if normalized.parent().is_some() && normalized != Path::new("/") {
+                    normalized.pop();
+                }
             }
             Component::CurDir => { /* skip . */ }
             c => normalized.push(c.as_os_str()),
@@ -19,7 +23,7 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 /// Rejects empty or root-level CWD to prevent sandbox bypass.
 pub fn resolve_path(cwd: &str, path: &str) -> Result<PathBuf, String> {
     let cwd_normalized = normalize_path(Path::new(cwd));
-    if cwd.is_empty() || cwd_normalized == Path::new("/") {
+    if cwd.is_empty() || cwd_normalized.parent().is_none() {
         return Err("Cannot resolve path: working directory is not set or is root".to_string());
     }
 

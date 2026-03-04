@@ -259,17 +259,12 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s).get(..80).unwrap_or(s.lines().next().unwrap_or(s))
 }
 
-fn ctrlc_handler(running: Arc<AtomicBool>) {
-    let _ = ctrlc_setup(running);
-}
-
-fn ctrlc_setup(running: Arc<AtomicBool>) -> Result<()> {
-    // Use a simple signal handler — just set the flag
-    // The actual cancellation is handled by the REPL loop
-    unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_DFL);
-    }
-    // rustyline handles Ctrl+C in readline, so we just need basic SIGINT behavior
-    let _ = running;
-    Ok(())
+/// Set up Ctrl+C handling. Rustyline handles SIGINT during readline (returns
+/// ReadlineError::Interrupted). Outside readline, we rely on the default
+/// signal disposition — the `running` flag lets the REPL loop distinguish
+/// between idle and active states for user feedback.
+fn ctrlc_handler(_running: Arc<AtomicBool>) {
+    // No custom signal handler needed: rustyline already catches Ctrl+C
+    // during readline and surfaces it as ReadlineError::Interrupted.
+    // The REPL loop checks the `running` flag for status messages.
 }
