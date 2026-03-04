@@ -239,12 +239,9 @@ async fn main() -> Result<()> {
                 println!();
             }
             Err(ReadlineError::Interrupted) => {
-                // Ctrl+C — if running, cancel; otherwise ignore
-                if running.load(Ordering::SeqCst) {
-                    eprintln!("\nCancelled.");
-                    running.store(false, Ordering::SeqCst);
-                }
-                continue;
+                // Ctrl+C at the prompt — exit
+                eprintln!("\nGoodbye!");
+                break;
             }
             Err(ReadlineError::Eof) => {
                 // Ctrl+D
