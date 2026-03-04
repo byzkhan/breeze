@@ -15,7 +15,7 @@ pub struct Config {
 }
 
 fn default_model() -> String {
-    "claude-sonnet-4-20250514".to_string()
+    "claude-opus-4-20250514".to_string()
 }
 
 fn default_max_iterations() -> u32 {
