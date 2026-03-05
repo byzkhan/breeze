@@ -120,7 +120,7 @@ impl Tool for BashTool {
             }
         };
 
-        truncate_output(&mut output, 16000);
+        truncate_output(&mut output, 4000);
         (output, success)
     }
 }

@@ -127,7 +127,7 @@ impl Agent {
                     &self.system_prompt,
                     &self.state.messages,
                     &tool_defs,
-                    16384,
+                    4096,
                 )
                 .await?;
 
@@ -138,6 +138,8 @@ impl Agent {
             let mut current_tool_name = String::new();
             let mut total_input_tokens: u64 = 0;
             let mut total_output_tokens: u64 = 0;
+            let mut total_cache_read: u64 = 0;
+            let mut total_cache_creation: u64 = 0;
 
             while let Some(event) = rx.recv().await {
                 match event {
@@ -176,9 +178,11 @@ impl Agent {
                         ui.tool_use_complete(&name, &input);
                         tool_calls.push((id, name, input));
                     }
-                    StreamEvent::Usage { input_tokens, output_tokens } => {
+                    StreamEvent::Usage { input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens } => {
                         total_input_tokens += input_tokens;
                         total_output_tokens += output_tokens;
+                        total_cache_read += cache_read_input_tokens;
+                        total_cache_creation += cache_creation_input_tokens;
                     }
                     StreamEvent::Done { stop_reason: sr } => {
                         stop_reason = sr;
@@ -212,7 +216,7 @@ impl Agent {
 
             // Show token usage for this turn
             if total_input_tokens > 0 || total_output_tokens > 0 {
-                ui.print_usage(total_input_tokens, total_output_tokens);
+                ui.print_usage(total_input_tokens, total_output_tokens, total_cache_read, total_cache_creation);
             }
 
             full_text.push_str(&current_text);
@@ -337,12 +341,16 @@ impl Agent {
 // ── Helper functions ───────────────────────────────────────────
 
 /// Compress older observations to save context.
-/// - Strips file content from old write_file/edit_file ToolUse inputs (biggest win)
+/// - Deduplicates read_file results (keeps only the latest read of each file)
+/// - Strips file content from old write_file/edit_file ToolUse inputs
 /// - Truncates long ToolResult outputs
-/// Keeps the last 3 tool interactions at full detail.
+/// Keeps the last 1 tool interaction at full detail.
 fn compress_observations(messages: &mut Vec<Message>) {
+    // ── 0. Deduplicate read_file results ─────────────────────────
+    // If the same file was read multiple times, compress all but the latest.
+    deduplicate_reads(messages);
+
     // ── 1. Compress old ToolUse inputs (assistant messages) ───────
-    // write_file inputs contain full file content; strip it from older calls.
     let mut tool_use_indices: Vec<(usize, usize)> = vec![];
     for (msg_idx, msg) in messages.iter().enumerate() {
         if msg.role != Role::Assistant {
@@ -355,15 +363,14 @@ fn compress_observations(messages: &mut Vec<Message>) {
         }
     }
 
-    if tool_use_indices.len() > 3 {
-        let to_compress = tool_use_indices.len() - 3;
+    if tool_use_indices.len() > 1 {
+        let to_compress = tool_use_indices.len() - 1;
         for &(msg_idx, block_idx) in &tool_use_indices[..to_compress] {
             if let Some(ContentBlock::ToolUse { name, input, .. }) =
                 messages[msg_idx].content.get_mut(block_idx)
             {
                 match name.as_str() {
                     "write_file" => {
-                        // Keep path, replace content with placeholder
                         if let Some(content) = input.get("content").and_then(|c| c.as_str()) {
                             let lines = content.lines().count();
                             let path = input["path"].as_str().unwrap_or("?");
@@ -374,7 +381,6 @@ fn compress_observations(messages: &mut Vec<Message>) {
                         }
                     }
                     "edit_file" => {
-                        // Keep path, compress old/new content
                         let path = input["path"].as_str().unwrap_or("?").to_string();
                         *input = serde_json::json!({
                             "path": path,
@@ -398,22 +404,22 @@ fn compress_observations(messages: &mut Vec<Message>) {
         }
     }
 
-    if tool_result_indices.len() > 3 {
-        let to_compress = tool_result_indices.len() - 3;
+    if tool_result_indices.len() > 1 {
+        let to_compress = tool_result_indices.len() - 1;
         for &(msg_idx, block_idx) in &tool_result_indices[..to_compress] {
             if let Some(ContentBlock::ToolResult { content, .. }) =
                 messages[msg_idx].content.get_mut(block_idx)
             {
                 let lines: Vec<&str> = content.lines().collect();
-                if lines.len() > 20 {
+                if lines.len() > 15 {
                     let mut compressed = String::new();
-                    for line in &lines[..10] {
+                    for line in &lines[..5] {
                         compressed.push_str(line);
                         compressed.push('\n');
                     }
                     compressed
-                        .push_str(&format!("... ({} lines omitted)\n", lines.len() - 20));
-                    for line in &lines[lines.len() - 10..] {
+                        .push_str(&format!("... ({} lines omitted)\n", lines.len() - 10));
+                    for line in &lines[lines.len() - 5..] {
                         compressed.push_str(line);
                         compressed.push('\n');
                     }
@@ -442,6 +448,59 @@ fn compress_observations(messages: &mut Vec<Message>) {
         for &(msg_idx, block_idx) in reminder_positions[..to_remove].iter().rev() {
             if messages[msg_idx].content.len() > 1 {
                 messages[msg_idx].content.remove(block_idx);
+            }
+        }
+    }
+}
+
+/// Deduplicate read_file results: if the same file was read multiple times,
+/// replace all but the latest read's ToolResult with a short note.
+fn deduplicate_reads(messages: &mut Vec<Message>) {
+    use std::collections::HashMap;
+
+    // Collect (tool_use_id → path) for all read_file calls
+    let mut id_to_path: HashMap<String, String> = HashMap::new();
+    for msg in messages.iter() {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, name, input } = block {
+                if name == "read_file" {
+                    if let Some(path) = input["path"].as_str() {
+                        id_to_path.insert(id.clone(), path.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Group tool_result positions by file path, keeping order
+    let mut path_to_positions: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        for (block_idx, block) in msg.content.iter().enumerate() {
+            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                if let Some(path) = id_to_path.get(tool_use_id) {
+                    path_to_positions
+                        .entry(path.clone())
+                        .or_default()
+                        .push((msg_idx, block_idx));
+                }
+            }
+        }
+    }
+
+    // For each file read multiple times, compress all but the last
+    for (path, positions) in &path_to_positions {
+        if positions.len() <= 1 {
+            continue;
+        }
+        for &(msg_idx, block_idx) in &positions[..positions.len() - 1] {
+            if let Some(ContentBlock::ToolResult { content, .. }) =
+                messages[msg_idx].content.get_mut(block_idx)
+            {
+                let line_count = content.lines().count();
+                *content = format!("[previously read {path} — {line_count} lines, see latest read]");
             }
         }
     }

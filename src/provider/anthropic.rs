@@ -91,15 +91,23 @@ fn serialize_messages(messages: &[Message]) -> Vec<serde_json::Value> {
 }
 
 /// Serialize tool definitions for the API.
+/// Adds `cache_control` to the last tool so the entire tool-definition block is cached.
 fn serialize_tools(tools: &[ToolDef]) -> Vec<serde_json::Value> {
+    let len = tools.len();
     tools
         .iter()
-        .map(|t| {
-            json!({
+        .enumerate()
+        .map(|(i, t)| {
+            let mut tool = json!({
                 "name": t.name,
                 "description": t.description,
                 "input_schema": t.input_schema,
-            })
+            });
+            // Tag the last tool with cache_control so system + tools are cached together
+            if i == len - 1 {
+                tool["cache_control"] = json!({"type": "ephemeral"});
+            }
+            tool
         })
         .collect()
 }
@@ -148,9 +156,15 @@ async fn parse_sse_stream(
                                     .and_then(|v| v.as_u64()).unwrap_or(0);
                                 let output = usage.get("output_tokens")
                                     .and_then(|v| v.as_u64()).unwrap_or(0);
+                                let cache_read = usage.get("cache_read_input_tokens")
+                                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                                let cache_creation = usage.get("cache_creation_input_tokens")
+                                    .and_then(|v| v.as_u64()).unwrap_or(0);
                                 let _ = tx.send(StreamEvent::Usage {
                                     input_tokens: input,
                                     output_tokens: output,
+                                    cache_read_input_tokens: cache_read,
+                                    cache_creation_input_tokens: cache_creation,
                                 }).await;
                             }
                         }
@@ -229,6 +243,8 @@ async fn parse_sse_stream(
                                 let _ = tx.send(StreamEvent::Usage {
                                     input_tokens: 0,
                                     output_tokens: output,
+                                    cache_read_input_tokens: 0,
+                                    cache_creation_input_tokens: 0,
                                 }).await;
                             }
                         }
@@ -362,7 +378,11 @@ impl LlmProvider for AnthropicProvider {
                     "model": model,
                     "max_tokens": max_tokens,
                     "stream": true,
-                    "system": system,
+                    "system": [{
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"}
+                    }],
                     "tools": wire_tools,
                     "messages": wire_messages,
                 });
@@ -371,6 +391,7 @@ impl LlmProvider for AnthropicProvider {
                     .post("https://api.anthropic.com/v1/messages")
                     .header("x-api-key", &api_key)
                     .header("anthropic-version", "2023-06-01")
+                    .header("anthropic-beta", "prompt-caching-2024-07-31")
                     .header("content-type", "application/json")
                     .json(&body)
                     .send()

@@ -181,7 +181,7 @@ impl Ui {
 
     // ── Token usage ───────────────────────────────────────────
 
-    pub fn print_usage(&self, input_tokens: u64, output_tokens: u64) {
+    pub fn print_usage(&self, input_tokens: u64, output_tokens: u64, _cache_read: u64, _cache_creation: u64) {
         let _ = execute!(io::stdout(), SetForegroundColor(Color::DarkGrey));
         let fmt_in = format_tokens(input_tokens);
         let fmt_out = format_tokens(output_tokens);

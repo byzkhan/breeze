@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::provider::ToolDef;
-use crate::util::resolve_path;
+use crate::util::{resolve_path, truncate_output};
 
 use super::Tool;
 
@@ -25,7 +25,7 @@ impl Tool for ReadFileTool {
                 "properties": {
                     "path": { "type": "string", "description": "File path (relative to CWD or absolute)" },
                     "offset": { "type": "integer", "description": "Starting line (0-indexed, default 0)" },
-                    "limit": { "type": "integer", "description": "Max lines to read (default 500)" }
+                    "limit": { "type": "integer", "description": "Max lines to read (default 200)" }
                 },
                 "required": ["path"]
             }),
@@ -52,7 +52,7 @@ impl Tool for ReadFileTool {
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
         let start = offset.unwrap_or(0) as usize;
-        let count = limit.unwrap_or(500) as usize;
+        let count = limit.unwrap_or(200) as usize;
         let end = start.saturating_add(count).min(total);
 
         if start >= total {
@@ -76,6 +76,7 @@ impl Tool for ReadFileTool {
             ));
         }
 
+        truncate_output(&mut output, 8000);
         (output, true)
     }
 }
